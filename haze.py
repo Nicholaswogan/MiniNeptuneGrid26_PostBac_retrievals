@@ -4,6 +4,10 @@ import numba as nb
 from pathlib import Path
 import pandas as pd
 import miepython
+from picaso import atmsetup
+
+
+_ATMSETUP_WEIGHT_HELPER = atmsetup.ATMSETUP.__new__(atmsetup.ATMSETUP)
 
 
 @nb.njit()
@@ -116,6 +120,27 @@ class McKayTitanHazeModel:
     def _dynamic_viscosity(self, T):
         return self.viscosity_ref*(T/self.viscosity_ref_temperature)**self.viscosity_temperature_exponent
 
+    @staticmethod
+    def _pressure_to_cgs(pressure, pressure_unit):
+        pressure = np.asarray(pressure, dtype=float)
+        unit = pressure_unit.lower()
+        if unit == 'bar':
+            return pressure*1.0e6
+        if unit in {'cgs', 'dyn/cm^2', 'dyn/cm2', 'barye'}:
+            return pressure
+        raise ValueError("`pressure_unit` must be 'bar' or 'dyn/cm^2'")
+
+    @staticmethod
+    def _number_density_from_state(pressure_dyn_cm2, temperature):
+        k_boltz = const.Boltzmann*1.0e7
+        return pressure_dyn_cm2/(k_boltz*temperature)
+
+    @staticmethod
+    def _surface_gravity(planet_radius, planet_mass):
+        if planet_radius is None or planet_mass is None:
+            raise ValueError("must provide both `planet_radius` and `planet_mass` when gravity is not supplied")
+        return gravity(planet_radius, planet_mass, 0.0)
+
     def _gravity_profile(self, z, gravity_profile, planet_radius, planet_mass):
         if gravity_profile is not None:
             grav = self._require_1d('gravity_profile', gravity_profile)
@@ -130,52 +155,193 @@ class McKayTitanHazeModel:
 
         return np.array([gravity(planet_radius, planet_mass, zi) for zi in z])
 
-    def _prepare_host_state(self, z, P, T, n_atm, mubar, q_mass, gravity_profile, planet_radius, planet_mass):
-        z = self._require_1d('z', z)
-        P = self._require_1d('P', P)
-        T = self._require_1d('T', T)
-        n_atm = self._require_1d('n_atm', n_atm)
-        mubar = self._require_1d('mubar', mubar)
-        q_mass = self._require_1d('q_mass', q_mass)
+    def _integrate_hydrostatic_profile(self, pressure_dyn_cm2, temperature, mubar, grav):
+        k_boltz = const.Boltzmann*1.0e7
+        avogadro = const.Avogadro
 
-        n = z.shape[0]
-        for name, arr in [('P', P), ('T', T), ('n_atm', n_atm), ('mubar', mubar), ('q_mass', q_mass)]:
+        pressure_dyn_cm2 = self._require_1d('pressure', pressure_dyn_cm2)
+        temperature = self._require_1d('temperature', temperature)
+        mubar = self._require_1d('mubar', mubar)
+        grav = self._require_1d('grav', grav)
+
+        n = pressure_dyn_cm2.shape[0]
+        for name, arr in [('temperature', temperature), ('mubar', mubar), ('grav', grav)]:
             if arr.shape[0] != n:
                 raise ValueError(f"`{name}` must have length {n}")
 
-        if np.any(P <= 0.0):
-            raise ValueError("`P` must be positive")
-        if np.any(T <= 0.0):
-            raise ValueError("`T` must be positive")
-        if np.any(n_atm <= 0.0):
-            raise ValueError("`n_atm` must be positive")
+        if np.any(pressure_dyn_cm2 <= 0.0):
+            raise ValueError("`pressure` must be positive")
+        if np.any(temperature <= 0.0):
+            raise ValueError("`temperature` must be positive")
         if np.any(mubar <= 0.0):
             raise ValueError("`mubar` must be positive")
+        if np.any(grav <= 0.0):
+            raise ValueError("`grav` must be positive")
+
+        z = np.zeros_like(pressure_dyn_cm2)
+        for i in range(1, n):
+            p_hi = pressure_dyn_cm2[i - 1]
+            p_lo = pressure_dyn_cm2[i]
+            if p_hi <= p_lo:
+                raise ValueError("`pressure` must decrease monotonically with altitude")
+            t_mid = 0.5*(temperature[i - 1] + temperature[i])
+            mu_mid = 0.5*(mubar[i - 1] + mubar[i])
+            g_mid = 0.5*(grav[i - 1] + grav[i])
+            scale_height = k_boltz*t_mid/((mu_mid/avogadro)*g_mid)
+            z[i] = z[i - 1] + scale_height*np.log(p_hi/p_lo)
+
+        return z
+
+    @staticmethod
+    def _shift_profile_to_reference_pressure(pressure_dyn_cm2, z, reference_pressure_dyn_cm2):
+        if reference_pressure_dyn_cm2 is None:
+            return z
+        pressure_dyn_cm2 = np.asarray(pressure_dyn_cm2, dtype=float)
+        z = np.asarray(z, dtype=float)
+        if pressure_dyn_cm2.shape != z.shape:
+            raise ValueError("`pressure` and `z` must have the same shape")
+        p_ref = float(reference_pressure_dyn_cm2)
+        if p_ref <= 0.0:
+            raise ValueError("`reference_pressure` must be positive")
+        p_min = np.min(pressure_dyn_cm2)
+        p_max = np.max(pressure_dyn_cm2)
+        if not (p_min <= p_ref <= p_max):
+            raise ValueError("`reference_pressure` must lie within the supplied pressure range")
+        z_ref = np.interp(p_ref, pressure_dyn_cm2[::-1], z[::-1])
+        return z - z_ref
+
+    def _derive_z_and_gravity(
+        self,
+        pressure_dyn_cm2,
+        temperature,
+        mubar,
+        *,
+        gravity_profile=None,
+        planet_radius=None,
+        planet_mass=None,
+        reference_pressure=None,
+        n_iter=3,
+    ):
+        pressure_dyn_cm2 = self._require_1d('pressure', pressure_dyn_cm2)
+        temperature = self._require_1d('temperature', temperature)
+        mubar = self._require_1d('mubar', mubar)
+
+        if gravity_profile is not None:
+            grav = self._require_1d('gravity_profile', gravity_profile)
+            if grav.shape[0] != pressure_dyn_cm2.shape[0]:
+                raise ValueError("`gravity_profile` must have the same length as `pressure`")
+            if np.any(grav <= 0.0):
+                raise ValueError("`gravity_profile` must be positive")
+            z = self._integrate_hydrostatic_profile(pressure_dyn_cm2, temperature, mubar, grav)
+            z = self._shift_profile_to_reference_pressure(
+                pressure_dyn_cm2,
+                z,
+                reference_pressure,
+            )
+            return z, grav
+
+        g_surface = self._surface_gravity(planet_radius, planet_mass)
+        grav_guess = np.full_like(pressure_dyn_cm2, g_surface)
+        z = None
+        for _ in range(n_iter):
+            z = self._integrate_hydrostatic_profile(pressure_dyn_cm2, temperature, mubar, grav_guess)
+            z = self._shift_profile_to_reference_pressure(pressure_dyn_cm2, z, reference_pressure)
+            grav_guess = np.array([gravity(planet_radius, planet_mass, zi) for zi in z])
+
+        return z, grav_guess
+
+    def _prepare_host_state(
+        self,
+        pressure,
+        temperature,
+        q_mass,
+        mubar,
+        *,
+        pressure_unit='dyn/cm^2',
+        z=None,
+        gravity_profile=None,
+        planet_radius=None,
+        planet_mass=None,
+        reference_pressure=None,
+    ):
+        pressure = self._require_1d('pressure', pressure)
+        temperature = self._require_1d('temperature', temperature)
+        q_mass = self._require_1d('q_mass', q_mass)
+        mubar = self._require_1d('mubar', mubar)
+
+        n = pressure.shape[0]
+        for name, arr in [('temperature', temperature), ('q_mass', q_mass), ('mubar', mubar)]:
+            if arr.shape[0] != n:
+                raise ValueError(f"`{name}` must have length {n}")
+
+        if np.any(pressure <= 0.0):
+            raise ValueError("`pressure` must be positive")
+        if np.any(temperature <= 0.0):
+            raise ValueError("`temperature` must be positive")
         if np.any(q_mass < 0.0):
             raise ValueError("`q_mass` must be non-negative")
+        if np.any(mubar <= 0.0):
+            raise ValueError("`mubar` must be positive")
 
-        if np.all(np.diff(z) < 0.0):
-            z = z[::-1].copy()
-            P = P[::-1].copy()
-            T = T[::-1].copy()
-            n_atm = n_atm[::-1].copy()
-            mubar = mubar[::-1].copy()
+        pressure_dyn_cm2 = self._pressure_to_cgs(pressure, pressure_unit)
+
+        if np.all(np.diff(pressure_dyn_cm2) > 0.0):
+            if z is not None:
+                raise ValueError(
+                    "`z` should not be supplied when `pressure` is ordered top-to-bottom; "
+                    "use `solve_from_atmosphere` or pre-order the profiles bottom-to-top."
+                )
+            pressure_dyn_cm2 = pressure_dyn_cm2[::-1].copy()
+            temperature = temperature[::-1].copy()
             q_mass = q_mass[::-1].copy()
+            mubar = mubar[::-1].copy()
             if gravity_profile is not None:
-                gravity_profile = np.asarray(gravity_profile, dtype=float)[::-1].copy()
-        elif not np.all(np.diff(z) > 0.0):
-            raise ValueError("`z` must be strictly monotonic")
+                gravity_profile = self._require_1d('gravity_profile', gravity_profile)[::-1].copy()
+        elif not np.all(np.diff(pressure_dyn_cm2) < 0.0):
+            raise ValueError("`pressure` must be strictly monotonic")
+        else:
+            if z is not None:
+                z = self._require_1d('z', z)
+            if gravity_profile is not None:
+                gravity_profile = self._require_1d('gravity_profile', gravity_profile)
 
-        grav = self._gravity_profile(z, gravity_profile, planet_radius, planet_mass)
+        if z is None:
+            if gravity_profile is None:
+                z, gravity_profile = self._derive_z_and_gravity(
+                    pressure_dyn_cm2,
+                    temperature,
+                    mubar,
+                    planet_radius=planet_radius,
+                    planet_mass=planet_mass,
+                    reference_pressure=reference_pressure,
+                )
+            else:
+                z, gravity_profile = self._derive_z_and_gravity(
+                    pressure_dyn_cm2,
+                    temperature,
+                    mubar,
+                    gravity_profile=gravity_profile,
+                    reference_pressure=reference_pressure,
+                )
+        else:
+            if z.shape[0] != n:
+                raise ValueError("`z` must have the same length as `pressure`")
+            if not (np.all(np.diff(z) > 0.0) or np.all(np.diff(z) < 0.0)):
+                raise ValueError("`z` must be strictly monotonic")
+            gravity_profile = self._gravity_profile(z, gravity_profile, planet_radius, planet_mass)
+            if np.all(np.diff(z) < 0.0):
+                raise ValueError("`z` must increase with altitude to match PICASO-style profiles")
+
+        n_atm = self._number_density_from_state(pressure_dyn_cm2, temperature)
 
         return {
             'z': z,
-            'P': P,
-            'T': T,
+            'P': pressure_dyn_cm2,
+            'T': temperature,
             'n_atm': n_atm,
             'mubar': mubar,
             'q_mass': q_mass,
-            'grav': grav
+            'grav': gravity_profile
         }
 
     def _build_haze_grid(self, host):
@@ -301,36 +467,66 @@ class McKayTitanHazeModel:
             return np.zeros_like(z)
         return column_production*shape/norm
 
-    def solve(self, z, P, T, n_atm, mubar, q_mass, *, gravity_profile=None, planet_radius=None, planet_mass=None):
+    def solve(
+        self,
+        pressure,
+        temperature,
+        q_mass,
+        *,
+        mubar,
+        pressure_unit='dyn/cm^2',
+        z=None,
+        gravity_profile=None,
+        planet_radius=None,
+        planet_mass=None,
+        reference_pressure=None,
+    ):
         """Solve the steady-state McKay haze model.
 
         Parameters
         ----------
-        z : ndarray
-            Altitude in cm, monotonically increasing upward.
-        P : ndarray
-            Pressure in dyn/cm^2.
-        T : ndarray
-            Temperature in K.
-        n_atm : ndarray
-            Atmospheric number density in cm^-3.
-        mubar : ndarray
-            Mean molecular weight in g/mol.
+        pressure : ndarray
+            Pressure profile.
+        temperature : ndarray
+            Temperature profile in K.
         q_mass : ndarray
             Bulk haze mass source in g/cm^3/s.
+        mubar : ndarray
+            Mean molecular weight profile in g/mol.
+        pressure_unit : str, optional
+            Units of ``pressure``. Use ``'bar'`` for PICASO-style inputs.
+        z : ndarray, optional
+            Altitude profile in cm. If omitted, the profile is derived from
+            hydrostatic balance.
         gravity_profile : ndarray, optional
-            Gravity profile in cm/s^2.
+            Gravity profile in cm/s^2. If omitted, and ``planet_radius`` and
+            ``planet_mass`` are provided, gravity is computed internally.
         planet_radius : float, optional
-            Planet radius in cm if `gravity_profile` is not supplied.
+            Planet radius in cm if gravity must be derived.
         planet_mass : float, optional
-            Planet mass in g if `gravity_profile` is not supplied.
+            Planet mass in g if gravity must be derived.
+        reference_pressure : float, optional
+            Pressure in the same units as ``pressure`` that corresponds to
+            ``planet_radius``. Used to anchor the altitude zero-point for gas
+            giants.
 
         Returns
         -------
         dict
             Haze properties on the internal haze grid and interpolated host grid.
         """
-        host = self._prepare_host_state(z, P, T, n_atm, mubar, q_mass, gravity_profile, planet_radius, planet_mass)
+        host = self._prepare_host_state(
+            pressure,
+            temperature,
+            q_mass,
+            mubar,
+            pressure_unit=pressure_unit,
+            z=z,
+            gravity_profile=gravity_profile,
+            planet_radius=planet_radius,
+            planet_mass=planet_mass,
+            reference_pressure=reference_pressure,
+        )
         haze = self._build_haze_grid(host)
 
         z_haze = haze['z']
@@ -429,6 +625,109 @@ class McKayTitanHazeModel:
                 'settling_velocity': host_v
             }
         }
+
+    def solve_from_atmosphere(
+        self,
+        atmosphere,
+        q_mass=None,
+        *,
+        mubar=None,
+        column_production=None,
+        peak_pressure=None,
+        width_pressure=None,
+        reference_pressure=None,
+        gravity_profile=None,
+        planet_radius=None,
+        planet_mass=None,
+    ):
+        """Convenience wrapper for PICASO-like atmosphere inputs.
+
+        Parameters
+        ----------
+        atmosphere : pandas.DataFrame or dict
+            Atmosphere container with pressure and temperature columns.
+        q_mass : ndarray
+            Bulk haze source profile on the same vertical grid.
+        column_production : float, optional
+            Total integrated haze production in g/cm^2/s used to build a
+            Gaussian source profile if ``q_mass`` is not supplied.
+        peak_pressure : float, optional
+            Pressure of peak haze production in bar, used with
+            ``column_production`` and ``width_pressure``.
+        width_pressure : float, optional
+            Gaussian pressure width in bar, used with ``column_production`` and
+            ``peak_pressure``.
+        mubar : ndarray, optional
+            Mean molecular weight profile. If omitted, it is derived from the
+            composition columns in ``atmosphere``.
+        gravity_profile, planet_radius, planet_mass : optional
+            Passed through to :meth:`solve`.
+        reference_pressure : float, optional
+            Reference pressure in bar at which ``planet_radius`` is defined for
+            gas giants. If omitted, the deepest supplied pressure is treated as
+            the reference level.
+        """
+        if not isinstance(atmosphere, pd.DataFrame):
+            raise TypeError("`atmosphere` must be a pandas DataFrame")
+        if 'pressure' not in atmosphere.columns:
+            raise ValueError("missing required atmosphere column 'pressure'")
+        if 'temperature' not in atmosphere.columns:
+            raise ValueError("missing required atmosphere column 'temperature'")
+        pressure = atmosphere['pressure'].to_numpy(dtype=float)
+        temperature = atmosphere['temperature'].to_numpy(dtype=float)
+        if mubar is None:
+            species_cols = [
+                c for c in atmosphere.columns
+                if c not in {'pressure', 'temperature'}
+            ]
+            if len(species_cols) == 0:
+                raise ValueError("no composition columns available to derive `mubar`")
+            weights = _ATMSETUP_WEIGHT_HELPER.get_weights(species_cols)
+            mol_weights = np.asarray([weights[s] for s in species_cols], dtype=float)
+            x = atmosphere[species_cols].to_numpy(dtype=float)
+            mubar = np.sum(x*mol_weights[None, :], axis=1)
+
+        if mubar is None:
+            raise ValueError("`mubar` must be provided or derivable from the atmosphere")
+
+        pressure_cgs = pressure*1.0e6
+        reference_pressure_cgs = None if reference_pressure is None else reference_pressure*1.0e6
+
+        if q_mass is None:
+            if column_production is None or peak_pressure is None or width_pressure is None:
+                raise ValueError(
+                    "provide either `q_mass` or all of `column_production`, "
+                    "`peak_pressure`, and `width_pressure`"
+                )
+            z_source, _ = self._derive_z_and_gravity(
+                pressure_cgs[::-1].copy(),
+                temperature[::-1].copy(),
+                mubar[::-1].copy(),
+                gravity_profile=gravity_profile[::-1].copy() if gravity_profile is not None else None,
+                planet_radius=planet_radius,
+                planet_mass=planet_mass,
+                reference_pressure=reference_pressure_cgs,
+            )
+            pressure_source = pressure_cgs[::-1].copy()
+            q_mass_source = self.gaussian_production_profile(
+                z_source,
+                pressure_source,
+                column_production,
+                peak_pressure*1.0e6,
+                width_pressure*1.0e6,
+            )
+            q_mass = q_mass_source[::-1].copy()
+
+        return self.solve(
+            pressure_cgs,
+            temperature,
+            q_mass,
+            mubar=mubar,
+            reference_pressure=reference_pressure_cgs,
+            gravity_profile=gravity_profile,
+            planet_radius=planet_radius,
+            planet_mass=planet_mass,
+        )
     
 
 def _miepython_optics_cache(
@@ -681,3 +980,46 @@ def make_picaso_haze_clouddf(
     cloud_df = cloud_df.sort_values(['pressure', 'wavenumber']).reset_index(drop=True)
 
     return cloud_df
+
+
+def make_picaso_haze_clouddf_from_solution(
+        solution,
+        *,
+        refractive_index_file='input/khare_tholins.refrind',
+        x_v=4/3,
+        x_i=0.5,
+        solar_cutoff_microns=5.0,
+        wave_range_microns=(0.1, 5.5),
+        n_wavelength=500,
+    ):
+    """Build a PICASO haze dataframe directly from :meth:`solve` output.
+
+    Parameters
+    ----------
+    solution : dict
+        Output of :meth:`McKayTitanHazeModel.solve` or its ``host_grid`` entry.
+    Other parameters
+        Passed through to :func:`make_picaso_haze_clouddf`.
+    """
+    host = solution.get('host_grid', solution)
+    if not isinstance(host, dict):
+        raise TypeError("`solution` must be the dict returned by `solve` or `solve()['host_grid']`")
+
+    pressure_bar = np.asarray(host['P'], dtype=float)/1.0e6
+    z = np.asarray(host['z'], dtype=float)
+    dz = np.gradient(z)
+    densities = np.asarray(host['number_density'], dtype=float)
+    radii = np.asarray(host['radius'], dtype=float)
+
+    return make_picaso_haze_clouddf(
+        pressure_bar,
+        dz,
+        densities,
+        radii,
+        refractive_index_file=refractive_index_file,
+        x_v=x_v,
+        x_i=x_i,
+        solar_cutoff_microns=solar_cutoff_microns,
+        wave_range_microns=wave_range_microns,
+        n_wavelength=n_wavelength,
+    )
