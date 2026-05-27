@@ -682,15 +682,23 @@ class McKayTitanHazeModel:
         pressure = atmosphere['pressure'].to_numpy(dtype=float)
         temperature = atmosphere['temperature'].to_numpy(dtype=float)
         if mubar is None:
-            species_cols = [
-                c for c in atmosphere.columns
-                if c not in {'pressure', 'temperature'}
-            ]
+            species_cols = []
+            mol_weights = []
+            x_cols = []
+            for c in atmosphere.columns:
+                if c in {'pressure', 'temperature'}:
+                    continue
+                try:
+                    weights = _ATMSETUP_WEIGHT_HELPER.get_weights([c])
+                    mol_weights.append(float(weights[c]))
+                    species_cols.append(c)
+                    x_cols.append(atmosphere[c].to_numpy(dtype=float))
+                except Exception:
+                    continue
             if len(species_cols) == 0:
-                raise ValueError("no composition columns available to derive `mubar`")
-            weights = _ATMSETUP_WEIGHT_HELPER.get_weights(species_cols)
-            mol_weights = np.asarray([weights[s] for s in species_cols], dtype=float)
-            x = atmosphere[species_cols].to_numpy(dtype=float)
+                raise ValueError("no PICASO-style composition columns available to derive `mubar`")
+            mol_weights = np.asarray(mol_weights, dtype=float)
+            x = np.column_stack(x_cols)
             mubar = np.sum(x*mol_weights[None, :], axis=1)
 
         if mubar is None:
