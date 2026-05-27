@@ -4,7 +4,7 @@ import numba as nb
 from pathlib import Path
 import pandas as pd
 import miepython
-from picaso import atmsetup
+from picaso import atmsetup, justdoit as jdi
 
 
 _ATMSETUP_WEIGHT_HELPER = atmsetup.ATMSETUP.__new__(atmsetup.ATMSETUP)
@@ -743,15 +743,22 @@ def _miepython_optics_cache(
         x_v,
         x_i,
         solar_cutoff_microns,
-        wave_min_microns,
-        wave_max_microns,
-        n_wavelength,
+        wave_grid_microns,
         radii_cm
     ):
 
     wave_in, nn, kk = _read_refrind_file(refrind_path)
 
-    wave_grid = np.linspace(wave_min_microns, wave_max_microns, n_wavelength)
+    wave_grid = np.asarray(wave_grid_microns, dtype=float)
+    if wave_grid.ndim != 1:
+        raise ValueError("`wave_grid_microns` must be a 1D array")
+    if wave_grid.shape[0] < 2:
+        raise ValueError("`wave_grid_microns` must contain at least two points")
+    if not np.all(np.isfinite(wave_grid)):
+        raise ValueError("`wave_grid_microns` contains non-finite values")
+    if np.any(wave_grid <= 0.0):
+        raise ValueError("`wave_grid_microns` must be positive")
+
     nn_grid = np.interp(wave_grid, wave_in, nn)
     kk_grid = np.interp(wave_grid, wave_in, kk)
     kk_grid = kk_grid*np.where(wave_grid <= solar_cutoff_microns, x_v, x_i)
@@ -759,9 +766,9 @@ def _miepython_optics_cache(
     radius_grid = np.asarray(radii_cm, dtype=float)
     n_radii = radius_grid.shape[0]
     wave_nm = wave_grid*1.0e3
-    qext = np.empty((n_wavelength, n_radii))
-    qscat = np.empty((n_wavelength, n_radii))
-    cos_qscat = np.empty((n_wavelength, n_radii))
+    qext = np.empty((wave_grid.shape[0], n_radii))
+    qscat = np.empty((wave_grid.shape[0], n_radii))
+    cos_qscat = np.empty((wave_grid.shape[0], n_radii))
 
     for iw, wavelength_nm in enumerate(wave_nm):
         m_eff = nn_grid[iw] - (1j)*kk_grid[iw]
@@ -773,6 +780,10 @@ def _miepython_optics_cache(
             cos_qscat[iw, ir] = qsca_i*g_i
 
     return wave_grid, radius_grid, qext, qscat, cos_qscat
+
+
+def _get_picaso_cloud_wavenumber_grid():
+    return np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
 
 
 def _coerce_haze_profiles(values, name, nlayer):
@@ -834,8 +845,6 @@ def make_picaso_haze_clouddf(
         x_v=4/3,
         x_i=0.5,
         solar_cutoff_microns=5.0,
-        wave_range_microns=(0.1, 5.5),
-        n_wavelength=500,
     ):
     """Build a PICASO cloud DataFrame from haze profiles and VIRGA Mie optics.
 
@@ -867,10 +876,6 @@ def make_picaso_haze_clouddf(
         Wavelength boundary, in microns, between the McKay ``Xv`` and ``Xi``
         regimes. The default of 5 microns follows the paper's separation
         between solar/near-infrared and thermal-infrared calculations.
-    wave_range_microns : tuple[float, float], optional
-        Minimum and maximum wavelengths, in microns, for the VIRGA Mie grid.
-    n_wavelength : int, optional
-        Number of wavelength points.
 
     Returns
     -------
@@ -908,16 +913,18 @@ def make_picaso_haze_clouddf(
         raise ValueError("`x_v` and `x_i` must be positive")
     if solar_cutoff_microns <= 0.0:
         raise ValueError("`solar_cutoff_microns` must be positive")
-    if len(wave_range_microns) != 2:
-        raise ValueError("`wave_range_microns` must contain exactly two values")
-    wave_min_microns = float(wave_range_microns[0])
-    wave_max_microns = float(wave_range_microns[1])
-    if wave_min_microns <= 0.0 or wave_min_microns >= wave_max_microns:
-        raise ValueError("`wave_range_microns` must satisfy 0 < min < max")
-    if n_wavelength < 2:
-        raise ValueError("`n_wavelength` must be >= 2")
 
     nlayer = pressure.shape[0]
+    cloud_wavenumber = _get_picaso_cloud_wavenumber_grid()
+    if cloud_wavenumber.ndim != 1:
+        raise ValueError("PICASO cloud grid must be a 1D array")
+    if cloud_wavenumber.shape[0] < 2:
+        raise ValueError("PICASO cloud grid must contain at least two points")
+    if not np.all(np.isfinite(cloud_wavenumber)):
+        raise ValueError("PICASO cloud grid contains non-finite values")
+    if np.any(cloud_wavenumber <= 0.0):
+        raise ValueError("PICASO cloud grid must be positive")
+
     density_profiles = _coerce_haze_profiles(densities, 'densities', nlayer)
     radius_profiles = _coerce_haze_profiles(radii, 'radii', nlayer)
     if set(density_profiles) != set(radius_profiles):
@@ -928,20 +935,17 @@ def make_picaso_haze_clouddf(
     if np.any(radii_all <= 0.0):
         raise ValueError("all `radii` values must be positive")
     radii_cm_grid = np.unique(radii_all.astype(float))
+    wave_grid_microns = 1.0e4 / cloud_wavenumber
     wavelengths_microns, radii_cm_grid, qext, qsca, cos_qscat = _miepython_optics_cache(
         str(refrind_path),
         float(x_v),
         float(x_i),
         float(solar_cutoff_microns),
-        wave_min_microns,
-        wave_max_microns,
-        int(n_wavelength),
+        wave_grid_microns,
         tuple(radii_cm_grid.tolist())
     )
 
     nwave = wavelengths_microns.shape[0]
-    wavelengths_cm = wavelengths_microns*1.0e-4
-    wavenumber = 1.0/wavelengths_cm
     w0 = np.divide(qsca, qext, out=np.zeros_like(qext), where=qext > 0.0)
     g0 = np.divide(cos_qscat, qsca, out=np.zeros_like(qsca), where=qsca > 0.0)
 
@@ -986,7 +990,7 @@ def make_picaso_haze_clouddf(
     )
 
     pressure_all = np.repeat(pressure, nwave)
-    wavenumber_all = np.tile(wavenumber, nlayer)
+    wavenumber_all = np.tile(cloud_wavenumber, nlayer)
     cloud_df = pd.DataFrame({
         'pressure': pressure_all,
         'wavenumber': wavenumber_all,
@@ -1006,8 +1010,6 @@ def make_picaso_haze_clouddf_from_solution(
         x_v=4/3,
         x_i=0.5,
         solar_cutoff_microns=5.0,
-        wave_range_microns=(0.1, 5.5),
-        n_wavelength=500,
     ):
     """Build a PICASO haze dataframe directly from :meth:`solve` output.
 
@@ -1047,6 +1049,4 @@ def make_picaso_haze_clouddf_from_solution(
         x_v=x_v,
         x_i=x_i,
         solar_cutoff_microns=solar_cutoff_microns,
-        wave_range_microns=wave_range_microns,
-        n_wavelength=n_wavelength,
     )

@@ -21,7 +21,6 @@ def main():
     mix['Ar'] = np.maximum(1.0 - sum(mix.values()), 1.0e-100)
     atm = utils.build_atmosphere(mix, T=255.0, log10_P_surf=np.log10(1.0), log10_P_top=-6.0, nlevels=100)
     cloud_df = utils.build_cloud_df(
-        opacity,
         atm,
         cloud_scheme="rfast-water",
         cloud_top_pressure=0.6,

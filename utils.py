@@ -253,7 +253,6 @@ def _build_rfast_like_cloud_df(pressure_levels_bar, wavenumber, opdir, ptop=0.6,
 
 
 def build_cloud_df(
-    opacity,
     atm,
     cloud_scheme="rfast",
     cloud_top_pressure=0.6,
@@ -266,6 +265,16 @@ def build_cloud_df(
     cloud_log10_P_bottom=None,
     cloud_log10_P_thick=None,
 ):
+    cloud_wavenumber = np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
+    if cloud_wavenumber.ndim != 1:
+        raise ValueError("PICASO cloud grid must be a 1D array")
+    if cloud_wavenumber.shape[0] < 2:
+        raise ValueError("PICASO cloud grid must contain at least two points")
+    if not np.all(np.isfinite(cloud_wavenumber)):
+        raise ValueError("PICASO cloud grid contains non-finite values")
+    if np.any(cloud_wavenumber <= 0.0):
+        raise ValueError("PICASO cloud grid must be positive")
+
     if cloud_scheme == "rfast":
         return _build_rfast_style_cloud_profile(
             atm=atm,
@@ -281,7 +290,7 @@ def build_cloud_df(
             raise ValueError("cloud_opdir must be provided for cloud_scheme='rfast-water'")
         return _build_rfast_like_cloud_df(
             pressure_levels_bar=np.asarray(atm["pressure"], dtype=float),
-            wavenumber=opacity.wno,
+            wavenumber=cloud_wavenumber,
             opdir=cloud_opdir,
             ptop=cloud_top_pressure,
             dpc=cloud_thickness,
@@ -301,10 +310,8 @@ def build_cloud_df(
             raise ValueError("Atmospheric pressure must increase monotonically from TOA to surface.")
 
         layer_pressure = np.sqrt(pressure_level[1:] * pressure_level[:-1])
-        wno = np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
-
-        pressure_all = np.repeat(layer_pressure, len(wno))
-        wno_all = np.tile(wno, len(layer_pressure))
+        pressure_all = np.repeat(layer_pressure, len(cloud_wavenumber))
+        wno_all = np.tile(cloud_wavenumber, len(layer_pressure))
         opd_all = np.zeros_like(pressure_all, dtype=float)
         w0_all = np.zeros_like(pressure_all, dtype=float)
         g0_all = np.zeros_like(pressure_all, dtype=float)
@@ -479,12 +486,24 @@ def spectrum(earth, opacity, water_cloud_df, haze_df, water_cloud_frac=0.5):
     df_clear = _run_case(haze_df)
     df_cloudy = _run_case(_combine_cloud_dfs(haze_df, water_cloud_df))
 
+    if not isinstance(df_clear, dict) or not isinstance(df_cloudy, dict):
+        raise TypeError("PICASO spectrum output is expected to be a dict")
+
     df_res = deepcopy(df_clear)
-    for col in df_res.columns:
-        if col == "wavenumber":
+    for key, clear_val in df_clear.items():
+        if key == "wavenumber":
             continue
-        if col in df_cloudy.columns and np.issubdtype(df_res[col].dtype, np.number):
-            df_res[col] = (1.0 - water_cloud_frac) * df_clear[col] + water_cloud_frac * df_cloudy[col]
+        if key not in df_cloudy:
+            continue
+
+        cloudy_val = df_cloudy[key]
+        if isinstance(clear_val, np.ndarray) and isinstance(cloudy_val, np.ndarray):
+            if clear_val.shape != cloudy_val.shape:
+                raise ValueError(f"spectrum arrays for key '{key}' do not have matching shapes")
+            if np.issubdtype(clear_val.dtype, np.number) and np.issubdtype(cloudy_val.dtype, np.number):
+                df_res[key] = (1.0 - water_cloud_frac) * clear_val + water_cloud_frac * cloudy_val
+        elif isinstance(clear_val, (float, int, np.floating, np.integer)) and isinstance(cloudy_val, (float, int, np.floating, np.integer)):
+            df_res[key] = (1.0 - water_cloud_frac) * clear_val + water_cloud_frac * cloudy_val
 
     return df_res
 
@@ -531,7 +550,6 @@ def model_raw(x, opacity, R=None):
         planet_mass=10.0**log10_Mp,
         cloud_frac=10.0**log10_fc,
         cloud_df=build_cloud_df(
-            opacity,
             atm,
             cloud_scheme="rfast",
             cloud_top_pressure=10.0**log10_pc,

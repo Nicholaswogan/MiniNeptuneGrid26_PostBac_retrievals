@@ -97,7 +97,10 @@ def main():
         planet_mass=TITAN_MASS_MEARTH,
         reference_pressure=TITAN_REFERENCE_PRESSURE_BAR,
     )
-    haze_df = haze.make_picaso_haze_clouddf_from_solution(solution, refractive_index_file='data/khare_tholins.refrind')
+    haze_df = haze.make_picaso_haze_clouddf_from_solution(
+        solution,
+        refractive_index_file='data/khare_tholins.refrind',
+    )
 
     planet = utils.initialize_model(
         opacity,
