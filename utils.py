@@ -393,6 +393,102 @@ def initialize_model(
 
     return earth
 
+def spectrum(earth, opacity, water_cloud_df, haze_df, water_cloud_frac=0.5):
+    """
+    Compute a reflected spectrum with globally uniform haze and patchy water clouds.
+
+    The haze is present in both the clear and cloudy columns. The water cloud is only
+    present in the cloudy column, and the final spectrum is the area-weighted mix:
+
+        (1 - water_cloud_frac) * clear_column + water_cloud_frac * cloudy_column
+
+    Parameters
+    ----------
+    earth : picaso.justdoit.inputs
+        Configured PICASO atmosphere/planet object.
+    opacity : object
+        PICASO opacity connection.
+    water_cloud_df : pandas.DataFrame
+        Cloud dataframe for the water-cloud column.
+    haze_df : pandas.DataFrame
+        Cloud dataframe for the globally uniform haze.
+    water_cloud_frac : float
+        Areal coverage of the cloudy column.
+    """
+    if not 0.0 <= water_cloud_frac <= 1.0:
+        raise ValueError("water_cloud_frac must be between 0 and 1")
+    if haze_df is None:
+        raise ValueError("haze_df must be provided")
+    if water_cloud_df is None:
+        raise ValueError("water_cloud_df must be provided")
+
+    def _combine_cloud_dfs(base_df, add_df):
+        base = base_df.sort_values(["pressure", "wavenumber"]).reset_index(drop=True)
+        add = add_df.sort_values(["pressure", "wavenumber"]).reset_index(drop=True)
+
+        required = {"pressure", "wavenumber", "opd", "w0", "g0"}
+        missing_base = required.difference(base.columns)
+        missing_add = required.difference(add.columns)
+        if missing_base:
+            raise ValueError(f"haze_df is missing required columns: {sorted(missing_base)}")
+        if missing_add:
+            raise ValueError(f"water_cloud_df is missing required columns: {sorted(missing_add)}")
+
+        if base.shape[0] != add.shape[0]:
+            raise ValueError("haze_df and water_cloud_df must have the same number of rows")
+
+        if not np.allclose(base["pressure"].to_numpy(dtype=float), add["pressure"].to_numpy(dtype=float)):
+            raise ValueError("haze_df and water_cloud_df must use the same pressure grid")
+        if not np.allclose(base["wavenumber"].to_numpy(dtype=float), add["wavenumber"].to_numpy(dtype=float)):
+            raise ValueError("haze_df and water_cloud_df must use the same wavenumber grid")
+
+        tau_base = base["opd"].to_numpy(dtype=float)
+        tau_add = add["opd"].to_numpy(dtype=float)
+        w0_base = base["w0"].to_numpy(dtype=float)
+        w0_add = add["w0"].to_numpy(dtype=float)
+        g0_base = base["g0"].to_numpy(dtype=float)
+        g0_add = add["g0"].to_numpy(dtype=float)
+
+        tau_total = tau_base + tau_add
+        scat_base = tau_base * w0_base
+        scat_add = tau_add * w0_add
+        scat_total = scat_base + scat_add
+
+        w0_eff = np.zeros_like(tau_total)
+        nonzero_tau = tau_total > 0
+        w0_eff[nonzero_tau] = scat_total[nonzero_tau] / tau_total[nonzero_tau]
+
+        g0_eff = np.zeros_like(tau_total)
+        nonzero_scat = scat_total > 0
+        g0_eff[nonzero_scat] = (
+            scat_base[nonzero_scat] * g0_base[nonzero_scat]
+            + scat_add[nonzero_scat] * g0_add[nonzero_scat]
+        ) / scat_total[nonzero_scat]
+
+        combined = base[["pressure", "wavenumber"]].copy()
+        combined["opd"] = tau_total
+        combined["w0"] = w0_eff
+        combined["g0"] = g0_eff
+        return combined
+
+    def _run_case(cloud_df):
+        case = deepcopy(earth)
+        case.clouds(df=cloud_df, do_holes=False)
+        return case.spectrum(opacity, calculation="reflected")
+
+    df_clear = _run_case(haze_df)
+    df_cloudy = _run_case(_combine_cloud_dfs(haze_df, water_cloud_df))
+
+    df_res = deepcopy(df_clear)
+    for col in df_res.columns:
+        if col == "wavenumber":
+            continue
+        if col in df_cloudy.columns and np.issubdtype(df_res[col].dtype, np.number):
+            df_res[col] = (1.0 - water_cloud_frac) * df_clear[col] + water_cloud_frac * df_cloudy[col]
+
+    return df_res
+
+
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
 
