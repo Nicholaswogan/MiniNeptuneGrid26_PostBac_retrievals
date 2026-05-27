@@ -2,6 +2,8 @@ import warnings
 warnings.filterwarnings('ignore')
 import input_files
 
+import os
+from astropy.io import ascii
 from copy import deepcopy
 import astropy.units as u
 import numpy as np
@@ -146,6 +148,110 @@ def _build_rfast_style_cloud_profile(atm, cloud_top_pressure, cloud_thickness, c
     )
 
 
+def _interp_extrap(x, xp, fp):
+    """Linearly interpolate and extrapolate onto x."""
+    x = np.asarray(x, dtype=float)
+    xp = np.asarray(xp, dtype=float)
+    fp = np.asarray(fp, dtype=float)
+    y = np.interp(x, xp, fp)
+
+    if xp.size > 1:
+        left = x < xp[0]
+        right = x > xp[-1]
+
+        if np.any(left):
+            slope = (fp[1] - fp[0]) / (xp[1] - xp[0])
+            y[left] = fp[0] + slope * (x[left] - xp[0])
+
+        if np.any(right):
+            slope = (fp[-1] - fp[-2]) / (xp[-1] - xp[-2])
+            y[right] = fp[-1] + slope * (x[right] - xp[-1])
+
+    return y
+
+
+def _read_rfast_cloud_optics(wavelength_um, opdir, lamc0=0.55):
+    """
+    Read the rfast liquid/ice cloud optical property tables and blend them 50/50.
+
+    Returns wavelength-dependent cloud single-scattering albedo, asymmetry
+    parameter, and extinction efficiency normalized at lamc0, following the
+    logic in rfast_opac_routines.py.
+    """
+    liquid_path = os.path.join(opdir, "strato_cum.mie")
+    ice_path = os.path.join(opdir, "baum_cirrus_de100.mie")
+
+    if not (os.path.exists(liquid_path) and os.path.exists(ice_path)):
+        raise FileNotFoundError(
+            "Could not find rfast cloud Mie tables. Expected "
+            f"{liquid_path} and {ice_path}."
+        )
+
+    liquid = ascii.read(liquid_path, data_start=20, delimiter=" ")
+    ice = ascii.read(ice_path, data_start=2, delimiter=" ")
+
+    wcl = _interp_extrap(wavelength_um, liquid["col1"], liquid["col10"])
+    gcl = _interp_extrap(wavelength_um, liquid["col1"], liquid["col11"])
+    qcl_raw = _interp_extrap(wavelength_um, liquid["col1"], liquid["col7"])
+    qcl_ref = _interp_extrap(np.array([lamc0]), liquid["col1"], liquid["col7"])[0]
+    qcl = qcl_raw / qcl_ref
+
+    wci = _interp_extrap(wavelength_um, ice["wl"], ice["omega"])
+    gci = _interp_extrap(wavelength_um, ice["wl"], ice["g"])
+    qci_raw = _interp_extrap(wavelength_um, ice["wl"], ice["Qe"])
+    qci_ref = _interp_extrap(np.array([lamc0]), ice["wl"], ice["Qe"])[0]
+    qci = qci_raw / qci_ref
+
+    frac_liquid = 0.5
+    w0 = frac_liquid * wcl + (1.0 - frac_liquid) * wci
+    g0 = frac_liquid * gcl + (1.0 - frac_liquid) * gci
+    qext = frac_liquid * qcl + (1.0 - frac_liquid) * qci
+    return w0, g0, qext
+
+
+def _build_rfast_like_cloud_df(pressure_levels_bar, wavenumber, opdir, ptop=0.6,
+                               dpc=0.1, tauc0=10.0, lamc0=0.55):
+    """
+    Build a PICASO cloud dataframe using the same cloud-top pressure and cloud
+    thickness convention as RFAST.
+    """
+    if dpc <= 0:
+        raise ValueError("dpc must be positive")
+
+    wavelength_um = 1e4 / np.asarray(wavenumber, dtype=float)
+
+    w0_wave, g0_wave, qext_wave = _read_rfast_cloud_optics(wavelength_um, opdir, lamc0=lamc0)
+    
+    tau_wave = tauc0 * qext_wave
+
+    level_pressure = np.asarray(pressure_levels_bar, dtype=float)
+    layer_pressure = np.sqrt(level_pressure[:-1] * level_pressure[1:])
+    pbot = ptop + dpc
+    cloud_thickness = dpc
+
+    rows = []
+    for ilay, pmid in enumerate(layer_pressure):
+        player_top = level_pressure[ilay]
+        player_bot = level_pressure[ilay + 1]
+        overlap = max(0.0, min(player_bot, pbot) - max(player_top, ptop))
+        tau_fraction = overlap / cloud_thickness if cloud_thickness > 0 else 0.0
+        opd_layer = tau_wave * tau_fraction
+
+        rows.append(
+            pd.DataFrame(
+                {
+                    "pressure": np.full_like(wavenumber, pmid, dtype=float),
+                    "wavenumber": np.asarray(wavenumber, dtype=float),
+                    "opd": opd_layer,
+                    "w0": w0_wave,
+                    "g0": g0_wave,
+                }
+            )
+        )
+
+    return pd.concat(rows, ignore_index=True)
+
+
 def initialize_model(
     opacity,
     atm,
@@ -167,6 +273,8 @@ def initialize_model(
     cloud_opd=10.0,
     cloud_w0=0.99,
     cloud_g0=0.85,
+    cloud_opdir=None,
+    cloud_lamc0=0.55,
     cloud_log10_P_bottom=None,
     cloud_log10_P_thick=None,
     clouds=True
@@ -228,6 +336,31 @@ def initialize_model(
                 fhole=weight_clear,
                 fthin_cld=0.0,
             )
+        elif cloud_scheme == "rfast-water":
+            if cloud_top_pressure is None or cloud_thickness is None:
+                raise ValueError(
+                    "cloud_top_pressure and cloud_thickness must both be provided "
+                    "for cloud_scheme='rfast-water'"
+                )
+            if cloud_opdir is None:
+                raise ValueError(
+                    "cloud_opdir must be provided for cloud_scheme='rfast-water'"
+                )
+            cloud_df = _build_rfast_like_cloud_df(
+                pressure_levels_bar=np.asarray(atm["pressure"], dtype=float),
+                wavenumber=opacity.wno,
+                opdir=cloud_opdir,
+                ptop=cloud_top_pressure,
+                dpc=cloud_thickness,
+                tauc0=cloud_opd,
+                lamc0=cloud_lamc0,
+            )
+            earth.clouds(
+                df=cloud_df,
+                do_holes=True,
+                fhole=weight_clear,
+                fthin_cld=0.0,
+            )
         elif cloud_scheme == "picaso":
             if cloud_log10_P_bottom is None or cloud_log10_P_thick is None:
                 raise ValueError(
@@ -245,7 +378,7 @@ def initialize_model(
                 fthin_cld=0.0,
             )
         else:
-            raise ValueError("cloud_scheme must be either 'rfast' or 'picaso'")
+            raise ValueError("cloud_scheme must be one of: 'rfast', 'rfast-water', 'picaso'")
 
     return earth
 
@@ -271,6 +404,18 @@ def initialize_model_picaso(
     Convenience wrapper for the legacy PICASO-style cloud parameterization.
     """
     kwargs["cloud_scheme"] = "picaso"
+    return initialize_model(opacity=opacity, atm=atm, **kwargs)
+
+
+def initialize_model_rfast_water(
+    opacity,
+    atm,
+    **kwargs,
+):
+    """
+    Convenience wrapper for the RFAST-style water-cloud parameterization.
+    """
+    kwargs["cloud_scheme"] = "rfast-water"
     return initialize_model(opacity=opacity, atm=atm, **kwargs)
 
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
@@ -352,4 +497,3 @@ def model(x, opacity, wv_bins):
         fpfs[i] = stars.rebin(wavl, fpfs1, b)
     
     return fpfs
-
