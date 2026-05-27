@@ -20,6 +20,16 @@ def main():
     }
     mix['Ar'] = np.maximum(1.0 - sum(mix.values()), 1.0e-100)
     atm = utils.build_atmosphere(mix, T=255.0, log10_P_surf=np.log10(1.0), log10_P_top=-6.0, nlevels=100)
+    cloud_df = utils.build_cloud_df(
+        opacity,
+        atm,
+        cloud_scheme="rfast-water",
+        cloud_top_pressure=0.6,
+        cloud_thickness=0.1,
+        cloud_opd=10.0,
+        cloud_opdir="data/hires_opacities",
+        cloud_lamc0=0.55,
+    )
 
     planet = utils.initialize_model(
         opacity,
@@ -36,17 +46,7 @@ def main():
         planet_radius=1.0,
         planet_mass=1.0,
         cloud_frac=0.5,
-        cloud_scheme="rfast-water",
-        cloud_top_pressure=0.6,
-        cloud_thickness=0.1,
-        cloud_opd=10.0,
-        cloud_w0=0.99,
-        cloud_g0=0.85,
-        cloud_opdir="data/hires_opacities",
-        cloud_lamc0=0.55,
-        cloud_log10_P_bottom=None,
-        cloud_log10_P_thick=None,
-        clouds=True
+        cloud_df=cloud_df,
     )
 
     df = planet.spectrum(opacity, calculation='reflected')

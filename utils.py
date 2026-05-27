@@ -252,6 +252,84 @@ def _build_rfast_like_cloud_df(pressure_levels_bar, wavenumber, opdir, ptop=0.6,
     return pd.concat(rows, ignore_index=True)
 
 
+def build_cloud_df(
+    opacity,
+    atm,
+    cloud_scheme="rfast",
+    cloud_top_pressure=0.6,
+    cloud_thickness=0.1,
+    cloud_opd=10.0,
+    cloud_w0=0.99,
+    cloud_g0=0.85,
+    cloud_opdir=None,
+    cloud_lamc0=0.55,
+    cloud_log10_P_bottom=None,
+    cloud_log10_P_thick=None,
+):
+    if cloud_scheme == "rfast":
+        return _build_rfast_style_cloud_profile(
+            atm=atm,
+            cloud_top_pressure=cloud_top_pressure,
+            cloud_thickness=cloud_thickness,
+            cloud_opd=cloud_opd,
+            cloud_w0=cloud_w0,
+            cloud_g0=cloud_g0,
+        )
+
+    if cloud_scheme == "rfast-water":
+        if cloud_opdir is None:
+            raise ValueError("cloud_opdir must be provided for cloud_scheme='rfast-water'")
+        return _build_rfast_like_cloud_df(
+            pressure_levels_bar=np.asarray(atm["pressure"], dtype=float),
+            wavenumber=opacity.wno,
+            opdir=cloud_opdir,
+            ptop=cloud_top_pressure,
+            dpc=cloud_thickness,
+            tauc0=cloud_opd,
+            lamc0=cloud_lamc0,
+        )
+
+    if cloud_scheme == "picaso":
+        if cloud_log10_P_bottom is None or cloud_log10_P_thick is None:
+            raise ValueError(
+                "cloud_log10_P_bottom and cloud_log10_P_thick must both be provided "
+                "for cloud_scheme='picaso'"
+            )
+
+        pressure_level = np.asarray(atm["pressure"], dtype=float)
+        if np.any(np.diff(pressure_level) <= 0):
+            raise ValueError("Atmospheric pressure must increase monotonically from TOA to surface.")
+
+        layer_pressure = np.sqrt(pressure_level[1:] * pressure_level[:-1])
+        wno = np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
+
+        pressure_all = np.repeat(layer_pressure, len(wno))
+        wno_all = np.tile(wno, len(layer_pressure))
+        opd_all = np.zeros_like(pressure_all, dtype=float)
+        w0_all = np.zeros_like(pressure_all, dtype=float)
+        g0_all = np.zeros_like(pressure_all, dtype=float)
+
+        maxp = 10.0 ** cloud_log10_P_bottom
+        minp = 10.0 ** (cloud_log10_P_bottom - cloud_log10_P_thick)
+        cloud_mask = (pressure_all >= minp) & (pressure_all <= maxp)
+        opd_all[cloud_mask] = cloud_opd
+        w0_all[cloud_mask] = cloud_w0
+        g0_all[cloud_mask] = cloud_g0
+
+        return pd.DataFrame(
+            {
+                "pressure": pressure_all,
+                "wavenumber": wno_all,
+                "opd": opd_all,
+                "w0": w0_all,
+                "g0": g0_all,
+            }
+        )
+
+    raise ValueError("cloud_scheme must be one of: 'rfast', 'rfast-water', 'picaso'")
+
+
+
 def initialize_model(
     opacity,
     atm,
@@ -267,17 +345,7 @@ def initialize_model(
     planet_radius=1.0,
     planet_mass=1.0,
     cloud_frac=0.5,
-    cloud_scheme="rfast",
-    cloud_top_pressure=0.6,
-    cloud_thickness=0.1,
-    cloud_opd=10.0,
-    cloud_w0=0.99,
-    cloud_g0=0.85,
-    cloud_opdir=None,
-    cloud_lamc0=0.55,
-    cloud_log10_P_bottom=None,
-    cloud_log10_P_thick=None,
-    clouds=True
+    cloud_df=None,
 ):
     
     # Initialize
@@ -314,113 +382,19 @@ def initialize_model(
     earth.atmosphere(df=atm)
 
     # Set the cloud
-    weight_clear = 1.0 - cloud_frac
-    if clouds:
-        if cloud_scheme == "rfast":
-            if cloud_top_pressure is None or cloud_thickness is None:
-                raise ValueError(
-                    "cloud_top_pressure and cloud_thickness must both be provided "
-                    "for cloud_scheme='rfast'"
-                )
-            cloud_df = _build_rfast_style_cloud_profile(
-                atm=atm,
-                cloud_top_pressure=cloud_top_pressure,
-                cloud_thickness=cloud_thickness,
-                cloud_opd=cloud_opd,
-                cloud_w0=cloud_w0,
-                cloud_g0=cloud_g0,
-            )
-            earth.clouds(
-                df=cloud_df,
-                do_holes=True,
-                fhole=weight_clear,
-                fthin_cld=0.0,
-            )
-        elif cloud_scheme == "rfast-water":
-            if cloud_top_pressure is None or cloud_thickness is None:
-                raise ValueError(
-                    "cloud_top_pressure and cloud_thickness must both be provided "
-                    "for cloud_scheme='rfast-water'"
-                )
-            if cloud_opdir is None:
-                raise ValueError(
-                    "cloud_opdir must be provided for cloud_scheme='rfast-water'"
-                )
-            cloud_df = _build_rfast_like_cloud_df(
-                pressure_levels_bar=np.asarray(atm["pressure"], dtype=float),
-                wavenumber=opacity.wno,
-                opdir=cloud_opdir,
-                ptop=cloud_top_pressure,
-                dpc=cloud_thickness,
-                tauc0=cloud_opd,
-                lamc0=cloud_lamc0,
-            )
-            earth.clouds(
-                df=cloud_df,
-                do_holes=True,
-                fhole=weight_clear,
-                fthin_cld=0.0,
-            )
-        elif cloud_scheme == "picaso":
-            if cloud_log10_P_bottom is None or cloud_log10_P_thick is None:
-                raise ValueError(
-                    "cloud_log10_P_bottom and cloud_log10_P_thick must both be provided "
-                    "for cloud_scheme='picaso'"
-                )
-            earth.clouds(
-                g0=[cloud_g0],
-                w0=[cloud_w0],
-                opd=[cloud_opd],
-                p=[cloud_log10_P_bottom],
-                dp=[cloud_log10_P_thick],
-                do_holes=True,
-                fhole=weight_clear,
-                fthin_cld=0.0,
-            )
-        else:
-            raise ValueError("cloud_scheme must be one of: 'rfast', 'rfast-water', 'picaso'")
+    if cloud_df is not None:
+        weight_clear = 1.0 - cloud_frac
+        earth.clouds(
+            df=cloud_df,
+            do_holes=True,
+            fhole=weight_clear,
+            fthin_cld=0.0,
+        )
 
     return earth
 
-
-def initialize_model_rfast(
-    opacity,
-    atm,
-    **kwargs,
-):
-    """
-    Convenience wrapper for the RFAST-style cloud parameterization.
-    """
-    kwargs["cloud_scheme"] = "rfast"
-    return initialize_model(opacity=opacity, atm=atm, **kwargs)
-
-
-def initialize_model_picaso(
-    opacity,
-    atm,
-    **kwargs,
-):
-    """
-    Convenience wrapper for the legacy PICASO-style cloud parameterization.
-    """
-    kwargs["cloud_scheme"] = "picaso"
-    return initialize_model(opacity=opacity, atm=atm, **kwargs)
-
-
-def initialize_model_rfast_water(
-    opacity,
-    atm,
-    **kwargs,
-):
-    """
-    Convenience wrapper for the RFAST-style water-cloud parameterization.
-    """
-    kwargs["cloud_scheme"] = "rfast-water"
-    return initialize_model(opacity=opacity, atm=atm, **kwargs)
-
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
-
 
 def model_raw(x, opacity, R=None):
     T = x[0]
@@ -460,12 +434,16 @@ def model_raw(x, opacity, R=None):
         planet_radius=10.0**log10_Rp,
         planet_mass=10.0**log10_Mp,
         cloud_frac=10.0**log10_fc,
-        cloud_top_pressure=10.0**log10_pc,
-        cloud_thickness=10.0**log10_dpc,
-        cloud_opd=10.0**log10_tauc,
-        cloud_w0=0.99,
-        cloud_g0=0.85,
-        clouds=True
+        cloud_df=build_cloud_df(
+            opacity,
+            atm,
+            cloud_scheme="rfast",
+            cloud_top_pressure=10.0**log10_pc,
+            cloud_thickness=10.0**log10_dpc,
+            cloud_opd=10.0**log10_tauc,
+            cloud_w0=0.99,
+            cloud_g0=0.85,
+        ),
     )
 
     df = planet.spectrum(opacity, calculation='reflected')
