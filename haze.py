@@ -666,6 +666,12 @@ class McKayTitanHazeModel:
             Reference pressure in bar at which ``planet_radius`` is defined for
             gas giants. If omitted, the deepest supplied pressure is treated as
             the reference level.
+        planet_radius : float, optional
+            Planet radius in Earth radii. Converted internally to cm for the
+            haze solver.
+        planet_mass : float, optional
+            Planet mass in Earth masses. Converted internally to g for the
+            haze solver.
         """
         if not isinstance(atmosphere, pd.DataFrame):
             raise TypeError("`atmosphere` must be a pandas DataFrame")
@@ -692,6 +698,8 @@ class McKayTitanHazeModel:
 
         pressure_cgs = pressure*1.0e6
         reference_pressure_cgs = None if reference_pressure is None else reference_pressure*1.0e6
+        planet_radius_cgs = None if planet_radius is None else planet_radius*6.371e8
+        planet_mass_cgs = None if planet_mass is None else planet_mass*5.9722e27
 
         if q_mass is None:
             if column_production is None or peak_pressure is None or width_pressure is None:
@@ -704,8 +712,8 @@ class McKayTitanHazeModel:
                 temperature[::-1].copy(),
                 mubar[::-1].copy(),
                 gravity_profile=gravity_profile[::-1].copy() if gravity_profile is not None else None,
-                planet_radius=planet_radius,
-                planet_mass=planet_mass,
+                planet_radius=planet_radius_cgs,
+                planet_mass=planet_mass_cgs,
                 reference_pressure=reference_pressure_cgs,
             )
             pressure_source = pressure_cgs[::-1].copy()
@@ -725,8 +733,8 @@ class McKayTitanHazeModel:
             mubar=mubar,
             reference_pressure=reference_pressure_cgs,
             gravity_profile=gravity_profile,
-            planet_radius=planet_radius,
-            planet_mass=planet_mass,
+            planet_radius=planet_radius_cgs,
+            planet_mass=planet_mass_cgs,
         )
     
 
@@ -782,6 +790,15 @@ def _coerce_haze_profiles(values, name, nlayer):
                 raise ValueError(f"`{name}` for species '{key}' contains non-finite values")
             out[key] = arr
         return out
+
+    arr = np.asarray(values, dtype=float)
+    if arr.ndim != 1:
+        raise ValueError(f"`{name}` must be a 1D array or a dict of 1D arrays")
+    if arr.shape[0] != nlayer:
+        raise ValueError(f"`{name}` has length {arr.shape[0]}, expected {nlayer}")
+    if not np.all(np.isfinite(arr)):
+        raise ValueError(f"`{name}` contains non-finite values")
+    return {'haze': arr}
 
 
 def _validate_refrind_file(refractive_index_file):
@@ -1005,17 +1022,27 @@ def make_picaso_haze_clouddf_from_solution(
     if not isinstance(host, dict):
         raise TypeError("`solution` must be the dict returned by `solve` or `solve()['host_grid']`")
 
-    pressure_bar = np.asarray(host['P'], dtype=float)/1.0e6
+    pressure = np.asarray(host['P'], dtype=float)
     z = np.asarray(host['z'], dtype=float)
-    dz = np.gradient(z)
     densities = np.asarray(host['number_density'], dtype=float)
     radii = np.asarray(host['radius'], dtype=float)
+
+    if pressure.shape[0] < 2:
+        raise ValueError("solution must contain at least two vertical levels")
+    if not (z.shape == pressure.shape == densities.shape == radii.shape):
+        raise ValueError("solution host-grid arrays must all have the same length")
+
+    # PICASO expects one cloud row per atmospheric layer, not per level.
+    pressure_bar = np.sqrt(pressure[:-1] * pressure[1:]) / 1.0e6
+    dz = np.abs(np.diff(z))
+    densities_layer = 0.5*(densities[:-1] + densities[1:])
+    radii_layer = 0.5*(radii[:-1] + radii[1:])
 
     return make_picaso_haze_clouddf(
         pressure_bar,
         dz,
-        densities,
-        radii,
+        densities_layer,
+        radii_layer,
         refractive_index_file=refractive_index_file,
         x_v=x_v,
         x_i=x_i,
