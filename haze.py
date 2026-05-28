@@ -33,7 +33,7 @@ class McKayTitanHazeModel:
             charging_radius=0.09e-4,
             top_seed_radius=1.0e-7,
             haze_grid_size=600,
-            top_extension_cm=2.0e7,
+            top_extension_cm=0.0,
             sweep_clear_below_z=None,
             sweep_clear_below_pressure=None,
             viscosity_ref=1.76e-4,
