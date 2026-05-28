@@ -124,11 +124,18 @@ def _build_rfast_style_cloud_profile(atm, cloud_top_pressure, cloud_thickness, c
     layer_pressure = np.sqrt(layer_top * layer_bottom)
 
     cloud_bottom_pressure = cloud_top_pressure + cloud_thickness
+    atmosphere_overlap = max(
+        0.0,
+        min(pressure_edges[-1], cloud_bottom_pressure) - max(pressure_edges[0], cloud_top_pressure),
+    )
     overlap = np.maximum(
         0.0,
         np.minimum(layer_bottom, cloud_bottom_pressure) - np.maximum(layer_top, cloud_top_pressure),
     )
-    layer_opd = cloud_opd * (overlap / cloud_thickness)
+    if atmosphere_overlap > 0.0:
+        layer_opd = cloud_opd * (overlap / atmosphere_overlap)
+    else:
+        layer_opd = np.zeros_like(overlap)
 
     wno = np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
     pressure_all = np.repeat(layer_pressure, len(wno))
@@ -228,13 +235,17 @@ def _build_rfast_like_cloud_df(pressure_levels_bar, wavenumber, opdir, ptop=0.6,
     layer_pressure = np.sqrt(level_pressure[:-1] * level_pressure[1:])
     pbot = ptop + dpc
     cloud_thickness = dpc
+    atmosphere_overlap = max(
+        0.0,
+        min(level_pressure[-1], pbot) - max(level_pressure[0], ptop),
+    )
 
     rows = []
     for ilay, pmid in enumerate(layer_pressure):
         player_top = level_pressure[ilay]
         player_bot = level_pressure[ilay + 1]
         overlap = max(0.0, min(player_bot, pbot) - max(player_top, ptop))
-        tau_fraction = overlap / cloud_thickness if cloud_thickness > 0 else 0.0
+        tau_fraction = overlap / atmosphere_overlap if atmosphere_overlap > 0 else 0.0
         opd_layer = tau_wave * tau_fraction
 
         rows.append(
@@ -351,6 +362,7 @@ def initialize_model(
     stellar_radius=1.0,
     planet_radius=1.0,
     planet_mass=1.0,
+    p_reference=1.0,
     cloud_frac=0.5,
     cloud_df=None,
 ):
@@ -368,6 +380,9 @@ def initialize_model(
         mass=planet_mass,
         mass_unit=u.Unit("M_earth"),
     )
+
+    # Reference pressure for the radius anchor
+    earth.approx(p_reference=p_reference)
 
     # Star
     earth.star(
@@ -506,86 +521,3 @@ def spectrum(earth, opacity, water_cloud_df, haze_df, water_cloud_frac=0.5):
             df_res[key] = (1.0 - water_cloud_frac) * clear_val + water_cloud_frac * cloudy_val
 
     return df_res
-
-
-def quantile_to_uniform(quantile, lower_bound, upper_bound):
-    return quantile*(upper_bound - lower_bound) + lower_bound
-
-def model_raw(x, opacity, R=None):
-    T = x[0]
-    log10_As = x[1]
-    log10_pc = x[2]
-    log10_dpc = x[3]
-    log10_tauc = x[4]
-    log10_fc = x[5]
-    log10_Rp = x[6]
-    log10_Mp = x[7]
-    a = x[8] # in AU
-    phase = x[9] # degrees
-    log10Pi = x[10:]
-
-    species = ['N2', 'O2', 'H2O', 'CO2', 'CH4', 'O3', 'H2', 'CO']
-    Pi = 10.0**(log10Pi)
-    P_surf = np.sum(Pi)
-    mix_i = P_surf/Pi
-    mix = {}
-    for i,sp in enumerate(species):
-        mix[sp] = mix_i[i]
-
-    atm = build_atmosphere(mix, T, np.log10(P_surf), log10_P_top=-6.0, nlevels=70)
-
-    planet = initialize_model(
-        opacity,
-        atm,
-        phase=phase*np.pi/180.0,
-        num_gangle=8, 
-        num_tangle=8,
-        surface_albedo=10.0**log10_As,
-        stellar_teff=5780.0,
-        stellar_metallicity=0.0,
-        stellar_logg=4.0,
-        semi_major=a,
-        stellar_radius=1.0,
-        planet_radius=10.0**log10_Rp,
-        planet_mass=10.0**log10_Mp,
-        cloud_frac=10.0**log10_fc,
-        cloud_df=build_cloud_df(
-            atm,
-            cloud_scheme="rfast",
-            cloud_top_pressure=10.0**log10_pc,
-            cloud_thickness=10.0**log10_dpc,
-            cloud_opd=10.0**log10_tauc,
-            cloud_w0=0.99,
-            cloud_g0=0.85,
-        ),
-    )
-
-    df = planet.spectrum(opacity, calculation='reflected')
-
-    wv = 1e4/df['wavenumber'][::-1].copy()
-    albedo = df['albedo'][::-1].copy()
-    fpfs = df['fpfs_reflected'][::-1].copy()
-
-    if R is not None:
-        wavl = stars.make_bins(wv)
-        wavl_new = stars.grid_at_resolution(wavl[0], wavl[1], R)
-        wv_new = (wavl_new[1:] + wavl[:-1])/2
-        albedo_new = stars.rebin(wavl, albedo, wavl_new)
-        fpfs_new = stars.rebin(wavl, fpfs, wavl_new)
-
-        wv = wv_new
-        albedo = albedo_new
-        fpfs = fpfs_new
-
-    return wv, albedo, fpfs
-
-def model(x, opacity, wv_bins):
-
-    wv, albedo, fpfs1 = model_raw(x, opacity)
-    wavl = stars.make_bins(wv)
-
-    fpfs = np.empty(len(wv_bins))
-    for i,b in enumerate(wv_bins):
-        fpfs[i] = stars.rebin(wavl, fpfs1, b)
-    
-    return fpfs
