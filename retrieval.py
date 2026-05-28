@@ -40,7 +40,7 @@ def model_raw(x, opacity, R=None):
         mix[sp] = mix_i[i]
 
     # Build atmosphere
-    atm = utils.build_atmosphere(mix, T, np.log10(P_surf), log10_P_top=-7.0, nlevels=90)
+    atm = utils.build_atmosphere(mix, T, np.log10(P_surf), log10_P_top=-8.0, nlevels=50)
 
     # Get cloud df
     cloud_df = utils.build_cloud_df(
@@ -74,8 +74,8 @@ def model_raw(x, opacity, R=None):
         opacity,
         atm,
         phase=phase*np.pi/180.0,
-        num_gangle=8, 
-        num_tangle=8,
+        num_gangle=4, 
+        num_tangle=4,
         surface_albedo=10.0**log10_As,
         stellar_teff=5780.0,
         stellar_metallicity=0.0,
