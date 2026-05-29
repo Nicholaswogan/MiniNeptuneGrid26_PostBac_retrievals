@@ -71,6 +71,7 @@ def model_raw(x, opacity, R=None):
     # Build atmosphere
     atm = utils.build_atmosphere(mix, T, np.log10(P_surf), log10_P_top=-8.0, nlevels=50)
     tick("built atmosphere", t0)
+    p_reference = np.clip(min(1.0, P_surf), float(np.min(atm["pressure"])), float(np.max(atm["pressure"])))
 
     # Get cloud df
     cloud_df = utils.build_cloud_df(
@@ -95,7 +96,7 @@ def model_raw(x, opacity, R=None):
         width_pressure=1.0e-6 * np.exp(-1.124),
         planet_radius=10.0**log10_Rp,
         planet_mass=10.0**log10_Mp,
-        reference_pressure=np.minimum(1.0, P_surf),
+        reference_pressure=p_reference,
     )
     tick("solved haze model", t0)
 
@@ -120,7 +121,7 @@ def model_raw(x, opacity, R=None):
         stellar_radius=1.0,
         planet_radius=10.0**log10_Rp,
         planet_mass=10.0**log10_Mp,
-        p_reference=np.minimum(1.0, P_surf),
+        p_reference=p_reference,
         cloud_frac=None,
         cloud_df=None
     )
