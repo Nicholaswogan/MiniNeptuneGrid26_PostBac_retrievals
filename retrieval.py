@@ -175,37 +175,24 @@ def model(x, opacity, wv_bins):
     
     return fpfs
 
-def make_loglike(model, opacity, data_dict):
-    def loglike(cube):
-        data_bins = data_dict['bins']
-        y = data_dict['fpfs']
-        e = data_dict['err']
-        resulty = model(cube, opacity, data_bins)
-        if np.any(np.isnan(resulty)):
-            return -1.0e100 # outside implicit priors
-        loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
-        return loglikelihood
-    return loglike
+def loglike(cube, data_name):
+    data_dict = DATA_DICTS[data_name]
+    data_bins = data_dict['bins']
+    y = data_dict['fpfs']
+    e = data_dict['err']
+    resulty = model(cube, OPACITY, data_bins)
+    if np.any(np.isnan(resulty)):
+        return -1.0e100 # outside implicit priors
+    loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
+    return loglikelihood
 
-def make_loglike_prior(data_dict, opacity, param_names, model, model_raw, prior):
+def loglike_clear(cube):
+    return loglike(cube, 'clear')
 
-    loglike = make_loglike(model, opacity, data_dict)
-
-    out = {
-        'loglike': loglike,
-        'prior': prior,
-        'param_names': param_names,
-        'data_dict': data_dict,
-        'model': model,
-        'model_raw': model_raw,
-    }
-
-    return out
-
+def loglike_hazy(cube):
+    return loglike(cube, 'hazy')
 
 def make_cases():
-
-    cases = {}
 
     param_names = [
         "T",
@@ -232,22 +219,37 @@ def make_cases():
     with open('data/neptune_20.pkl','rb') as f:
         data = pickle.load(f)
 
-    cases['clear'] = make_loglike_prior(data['clear'], OPACITY, param_names, model, model_raw, prior)
-    cases['hazy'] = make_loglike_prior(data['hazy'], OPACITY, param_names, model, model_raw, prior)
+    retrieval_names = ['clear', 'hazy']
+    data_dicts = {
+        'clear': data['clear'],
+        'hazy': data['hazy'],
+    }
+    param_names_out = {
+        'clear': param_names,
+        'hazy': param_names
+    }
 
-    return cases
+    return retrieval_names, data_dicts, param_names_out
 
 OPACITY = jdi.opannection(
     wave_range=[0.4,1.85],
     filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
 )
-RETRIEVAL_CASES = make_cases()
+RETRIEVAL_NAMES, DATA_DICTS, PARAM_NAMES = make_cases()
+LOGLIKES = {
+    'clear': loglike_clear,
+    'hazy': loglike_hazy,
+}
+PRIORS = {
+    'clear': prior,
+    'hazy': prior
+}
 
 if __name__ == '__main__':
     nb.set_num_threads(1)
     _ = threadpool_limits(limits=1)
 
-    models_to_run = list(RETRIEVAL_CASES.keys())
+    models_to_run = RETRIEVAL_NAMES
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
@@ -258,9 +260,9 @@ if __name__ == '__main__':
 
         # Do nested sampling
         results = solve(
-            LogLikelihood=RETRIEVAL_CASES[model_name]['loglike'], 
-            Prior=RETRIEVAL_CASES[model_name]['prior'], 
-            n_dims=len(RETRIEVAL_CASES[model_name]['param_names']), 
+            LogLikelihood=LOGLIKES[model_name], 
+            Prior=PRIORS[model_name], 
+            n_dims=len(PARAM_NAMES[model_name]), 
             outputfiles_basename=outputfiles_basename, 
             verbose=True,
             n_live_points=1000
