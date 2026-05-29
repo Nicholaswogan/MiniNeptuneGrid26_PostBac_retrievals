@@ -27,6 +27,16 @@ def untransform(log10u_i):
     return x_i
 
 def model_raw(x, opacity, R=None):
+
+    def tick(label, t0):
+        if VERBOSE:
+            print(
+                f"pid={PID}: {label}; elapsed={time.time() - t0:.2f}s",
+                flush=True
+            )
+
+    t0 = time.time()
+
     T = x[0]
     log10_As = x[1]
     log10_pc = x[2]
@@ -40,17 +50,21 @@ def model_raw(x, opacity, R=None):
     phase = x[10] # degrees
     log10P_surf = x[11]
     log10u_i = x[12:]
+    tick("parsed parameters", t0)
 
     # Get mixing ratios
     species = ['N2', 'O2', 'H2O', 'CO2', 'CH4', 'O3', 'H2', 'CO']
     mix_i = untransform(log10u_i)
     P_surf = 10.0**log10P_surf
+
     mix = {}
     for i,sp in enumerate(species):
         mix[sp] = mix_i[i]
+    tick("computed mixing ratios", t0)
 
     # Build atmosphere
     atm = utils.build_atmosphere(mix, T, np.log10(P_surf), log10_P_top=-8.0, nlevels=50)
+    tick("built atmosphere", t0)
 
     # Get cloud df
     cloud_df = utils.build_cloud_df(
@@ -62,9 +76,12 @@ def model_raw(x, opacity, R=None):
         cloud_w0=0.99,
         cloud_g0=0.85,
     )
+    tick("built cloud dataframe", t0)
 
     # Get haze df
     m = haze.McKayTitanHazeModel(sweep_clear_below_pressure=1.0e7)
+    tick("initialized haze model", t0)
+
     solution = m.solve_from_atmosphere(
         atm,
         column_production=10.0**log10_haze_prod,
@@ -74,10 +91,13 @@ def model_raw(x, opacity, R=None):
         planet_mass=10.0**log10_Mp,
         reference_pressure=np.minimum(1.0, P_surf),
     )
+    tick("solved haze model", t0)
+
     haze_df = haze.make_picaso_haze_clouddf_from_solution(
         solution, 
         refractive_index_file='data/khare_tholins.refrind'
     )
+    tick("built haze dataframe", t0)
 
     # Initialize class
     planet = utils.initialize_model(
@@ -98,14 +118,17 @@ def model_raw(x, opacity, R=None):
         cloud_frac=None,
         cloud_df=None
     )
+    tick("initialized PICASO model", t0)
 
     # Compute spectrum
     df = utils.spectrum(planet, opacity, cloud_df, haze_df, water_cloud_frac=10.0**log10_fc)
+    tick("computed spectrum", t0)
 
     # Unpack result
     wv = 1e4/df['wavenumber'][::-1].copy()
     albedo = df['albedo'][::-1].copy()
     fpfs = df['fpfs_reflected'][::-1].copy()
+    tick("unpacked spectrum", t0)
 
     if R is not None:
         wavl = stars.make_bins(wv)
@@ -117,6 +140,9 @@ def model_raw(x, opacity, R=None):
         wv = wv_new
         albedo = albedo_new
         fpfs = fpfs_new
+        tick(f"rebinned to R={R}", t0)
+
+    tick("finished model_raw", t0)
 
     return wv, albedo, fpfs
 
