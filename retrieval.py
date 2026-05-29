@@ -179,29 +179,34 @@ def model(x, opacity, wv_bins):
 
 def loglike(cube, data_name):
 
-    print(f"pid={PID}: entered loglike ({data_name})", flush=True)
+    if VERBOSE:
+        print(f"pid={PID}: entered loglike ({data_name})", flush=True)
 
     data_dict = DATA_DICTS[data_name]
     data_bins = data_dict['bins']
     y = data_dict['fpfs']
     e = data_dict['err']
 
-    print(f"pid={PID}: before model()", flush=True)
+    if VERBOSE:
+        print(f"pid={PID}: before model()", flush=True)
 
     resulty = model(cube, OPACITY, data_bins)
 
-    print(f"pid={PID}: after model()", flush=True)
+    if VERBOSE:
+        print(f"pid={PID}: after model()", flush=True)
 
     if np.any(np.isnan(resulty)):
-        print(f"pid={PID}: returning -1e100 (nan)", flush=True)
+        if VERBOSE:
+            print(f"pid={PID}: returning -1e100 (nan)", flush=True)
         return -1.0e100 # outside implicit priors
 
     loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
 
-    print(
-        f"pid={PID}: returning loglike = {loglikelihood}",
-        flush=True
-    )
+    if VERBOSE:
+        print(
+            f"pid={PID}: returning loglike = {loglikelihood}",
+            flush=True
+        )
 
     return loglikelihood
 
@@ -263,6 +268,7 @@ PRIORS = {
     'clear': prior,
     'hazy': prior
 }
+VERBOSE = False
 
 if __name__ == '__main__':
     nb.set_num_threads(1)
