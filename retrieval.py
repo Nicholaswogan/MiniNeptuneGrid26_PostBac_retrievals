@@ -28,6 +28,12 @@ def untransform(log10u_i):
 
 def model_raw(x, opacity, R=None):
 
+    if VERBOSE:
+        print(
+            f"pid={os.getpid()}: x = {np.array2string(np.asarray(x), precision=17, separator=', ', max_line_width=np.inf)}",
+            flush=True,
+        )
+
     def tick(label, t0):
         if VERBOSE:
             print(
@@ -314,7 +320,7 @@ PRIORS = {
     'clear': prior,
     'hazy': prior
 }
-VERBOSE = False
+VERBOSE = True
 
 if __name__ == '__main__':
     nb.set_num_threads(1)
