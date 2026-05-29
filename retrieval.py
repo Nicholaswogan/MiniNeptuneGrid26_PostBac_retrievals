@@ -12,6 +12,7 @@ from pymultinest.solve import solve
 import os
 from picaso import justdoit as jdi
 import numba as nb
+from threadpoolctl import threadpool_limits
 
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
@@ -244,6 +245,7 @@ RETRIEVAL_CASES = make_cases()
 
 if __name__ == '__main__':
     nb.set_num_threads(1)
+    _ = threadpool_limits(limits=1)
 
     models_to_run = list(RETRIEVAL_CASES.keys())
     for model_name in models_to_run:
