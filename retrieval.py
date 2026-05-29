@@ -13,8 +13,10 @@ import os
 from picaso import justdoit as jdi
 import numba as nb
 from threadpoolctl import threadpool_limits
+import time
 
 PID = os.getpid()
+LOG_LIKE_COUNT = 0
 
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
@@ -178,9 +180,13 @@ def model(x, opacity, wv_bins):
     return fpfs
 
 def loglike(cube, data_name):
+    global LOG_LIKE_COUNT
+    LOG_LIKE_COUNT += 1
+    eval_id = LOG_LIKE_COUNT
+    t0 = time.time()
 
     if VERBOSE:
-        print(f"pid={PID}: entered loglike ({data_name})", flush=True)
+        print(f"pid={PID}: entered loglike #{eval_id} ({data_name})", flush=True)
 
     data_dict = DATA_DICTS[data_name]
     data_bins = data_dict['bins']
@@ -188,23 +194,37 @@ def loglike(cube, data_name):
     e = data_dict['err']
 
     if VERBOSE:
-        print(f"pid={PID}: before model()", flush=True)
+        print(f"pid={PID}: before model() #{eval_id}", flush=True)
 
+    t_model0 = time.time()
     resulty = model(cube, OPACITY, data_bins)
+    t_model1 = time.time()
+
+    model_time = t_model1 - t_model0
+    total_time = t_model1 - t0
 
     if VERBOSE:
-        print(f"pid={PID}: after model()", flush=True)
+        print(
+            f"pid={PID}: after model() #{eval_id}; "
+            f"model_time={model_time:.2f}s total_time={total_time:.2f}s",
+            flush=True
+        )
 
     if np.any(np.isnan(resulty)):
         if VERBOSE:
-            print(f"pid={PID}: returning -1e100 (nan)", flush=True)
-        return -1.0e100 # outside implicit priors
+            print(
+                f"pid={PID}: returning -1e100 (nan) #{eval_id}; "
+                f"model_time={model_time:.2f}s total_time={total_time:.2f}s",
+                flush=True
+            )
+        return -1.0e100
 
     loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
 
     if VERBOSE:
         print(
-            f"pid={PID}: returning loglike = {loglikelihood}",
+            f"pid={PID}: returning loglike #{eval_id} = {loglikelihood:.6e}; "
+            f"model_time={model_time:.2f}s total_time={total_time:.2f}s",
             flush=True
         )
 
