@@ -320,7 +320,7 @@ PRIORS = {
     'clear': prior,
     'hazy': prior
 }
-VERBOSE = True
+VERBOSE = False
 
 if __name__ == '__main__':
     nb.set_num_threads(1)
