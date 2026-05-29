@@ -259,6 +259,7 @@ if __name__ == '__main__':
             pass
 
         # Do nested sampling
+        print(f"starting solve for {model_name}", flush=True)
         results = solve(
             LogLikelihood=LOGLIKES[model_name], 
             Prior=PRIORS[model_name], 
