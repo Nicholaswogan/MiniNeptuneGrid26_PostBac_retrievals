@@ -14,6 +14,8 @@ from picaso import justdoit as jdi
 import numba as nb
 from threadpoolctl import threadpool_limits
 
+PID = os.getpid()
+
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
 
@@ -176,14 +178,31 @@ def model(x, opacity, wv_bins):
     return fpfs
 
 def loglike(cube, data_name):
+
+    print(f"pid={PID}: entered loglike ({data_name})", flush=True)
+
     data_dict = DATA_DICTS[data_name]
     data_bins = data_dict['bins']
     y = data_dict['fpfs']
     e = data_dict['err']
+
+    print(f"pid={PID}: before model()", flush=True)
+
     resulty = model(cube, OPACITY, data_bins)
+
+    print(f"pid={PID}: after model()", flush=True)
+
     if np.any(np.isnan(resulty)):
+        print(f"pid={PID}: returning -1e100 (nan)", flush=True)
         return -1.0e100 # outside implicit priors
+
     loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
+
+    print(
+        f"pid={PID}: returning loglike = {loglikelihood}",
+        flush=True
+    )
+
     return loglikelihood
 
 def loglike_clear(cube):
@@ -259,7 +278,7 @@ if __name__ == '__main__':
             pass
 
         # Do nested sampling
-        print(f"starting solve for {model_name}", flush=True)
+        print(f"pid={PID}: starting solve for {model_name}", flush=True)
         results = solve(
             LogLikelihood=LOGLIKES[model_name], 
             Prior=PRIORS[model_name], 
