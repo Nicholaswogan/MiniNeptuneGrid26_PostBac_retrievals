@@ -7,6 +7,11 @@ import numpy as np
 from photochem.utils import stars
 from scipy.stats import truncnorm
 import haze
+import pickle
+from pymultinest.solve import solve
+import os
+from picaso import justdoit as jdi
+import numba as nb
 
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
@@ -134,8 +139,32 @@ def prior(cube):
     params[19] = quantile_to_uniform(cube[19], -13, 0) # CO
     return params  
 
+def implicit_priors(x):
+    T = x[0]
+    log10_As = x[1]
+    log10_pc = x[2]
+    log10_dpc = x[3]
+    log10_tauc = x[4]
+    log10_haze_prod = x[5]
+    log10_fc = x[6]
+    log10_Rp = x[7]
+    log10_Mp = x[8]
+    a = x[9]
+    phase = x[10]
+    log10P_surf = x[11]
+    log10u_i = x[12:]
+
+    if log10_pc >= log10P_surf:
+        return False
+    
+    return True
+
 def model(x, opacity, wv_bins):
 
+    within_implicit_priors = implicit_priors(x)
+    if not within_implicit_priors:
+        return np.zeros(len(wv_bins))*np.nan
+    
     wv, albedo, fpfs1 = model_raw(x, opacity)
     wavl = stars.make_bins(wv)
 
@@ -145,3 +174,95 @@ def model(x, opacity, wv_bins):
     
     return fpfs
 
+def make_loglike(model, opacity, data_dict):
+    def loglike(cube):
+        data_bins = data_dict['bins']
+        y = data_dict['fpfs']
+        e = data_dict['err']
+        resulty = model(cube, opacity, data_bins)
+        if np.any(np.isnan(resulty)):
+            return -1.0e100 # outside implicit priors
+        loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
+        return loglikelihood
+    return loglike
+
+def make_loglike_prior(data_dict, opacity, param_names, model, model_raw, prior):
+
+    loglike = make_loglike(model, opacity, data_dict)
+
+    out = {
+        'loglike': loglike,
+        'prior': prior,
+        'param_names': param_names,
+        'data_dict': data_dict,
+        'model': model,
+        'model_raw': model_raw,
+    }
+
+    return out
+
+
+def make_cases():
+
+    cases = {}
+
+    param_names = [
+        "T",
+        "log10_As",
+        "log10_pc",
+        "log10_dpc",
+        "log10_tauc",
+        "log10_haze_prod",
+        "log10_fc",
+        "log10_Rp",
+        "log10_Mp",
+        "a",
+        "phase",
+        "log10P_surf",
+        "log10u_N2",
+        "log10u_O2",
+        "log10u_H2O",
+        "log10u_CO2",
+        "log10u_CH4",
+        "log10u_O3",
+        "log10u_H2",
+        "log10u_CO",
+    ]
+    with open('data/neptune_20.pkl','rb') as f:
+        data = pickle.load(f)
+
+    cases['clear'] = make_loglike_prior(data['clear'], OPACITY, param_names, model, model_raw, prior)
+    cases['hazy'] = make_loglike_prior(data['hazy'], OPACITY, param_names, model, model_raw, prior)
+
+    return cases
+
+OPACITY = jdi.opannection(
+    wave_range=[0.4,1.85],
+    filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
+)
+RETRIEVAL_CASES = make_cases()
+
+if __name__ == '__main__':
+    nb.set_num_threads(1)
+
+    models_to_run = list(RETRIEVAL_CASES.keys())
+    for model_name in models_to_run:
+        # Setup directories
+        outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
+        try:
+            os.mkdir(f'pymultinest/{model_name}')
+        except FileExistsError:
+            pass
+
+        # Do nested sampling
+        results = solve(
+            LogLikelihood=RETRIEVAL_CASES[model_name]['loglike'], 
+            Prior=RETRIEVAL_CASES[model_name]['prior'], 
+            n_dims=len(RETRIEVAL_CASES[model_name]['param_names']), 
+            outputfiles_basename=outputfiles_basename, 
+            verbose=True,
+            n_live_points=1000
+        )
+        # Save pickle
+        with open(outputfiles_basename + ".pkl", "wb") as f:
+            pickle.dump(results, f)
