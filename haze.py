@@ -1,3 +1,4 @@
+from functools import lru_cache
 import numpy as np
 from scipy import constants as const
 import numba as nb
@@ -746,6 +747,7 @@ class McKayTitanHazeModel:
         )
     
 
+@lru_cache(maxsize=64)
 def _miepython_optics_cache(
         refrind_path,
         x_v,
@@ -790,6 +792,7 @@ def _miepython_optics_cache(
     return wave_grid, radius_grid, qext, qscat, cos_qscat
 
 
+@lru_cache(maxsize=1)
 def _get_picaso_cloud_wavenumber_grid():
     return np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
 
@@ -829,6 +832,7 @@ def _validate_refrind_file(refractive_index_file):
     return path.resolve()
 
 
+@lru_cache(maxsize=16)
 def _read_refrind_file(refrind_path):
     data = np.loadtxt(refrind_path, usecols=[1, 2, 3])
     wave_in = np.asarray(data[:, 0], dtype=float)
@@ -949,7 +953,7 @@ def make_picaso_haze_clouddf(
         float(x_v),
         float(x_i),
         float(solar_cutoff_microns),
-        wave_grid_microns,
+        tuple(wave_grid_microns.tolist()),
         tuple(radii_cm_grid.tolist())
     )
 
