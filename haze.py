@@ -33,6 +33,7 @@ class McKayTitanHazeModel:
             particle_density=1.0,
             charging_radius=0.09e-4,
             top_seed_radius=1.0e-7,
+            max_particle_radius=1.0e-3,
             haze_grid_size=600,
             top_extension_cm=0.0,
             sweep_clear_below_z=None,
@@ -52,6 +53,8 @@ class McKayTitanHazeModel:
             factor of ``exp(-r / charging_radius)``.
         top_seed_radius : float, optional
             Initial particle radius at the top of the haze grid in cm.
+        max_particle_radius : float, optional
+            Hard upper cap on particle radius in cm.
         haze_grid_size : int, optional
             Number of points in the internal uniformly spaced haze grid.
         top_extension_cm : float, optional
@@ -75,6 +78,7 @@ class McKayTitanHazeModel:
         self.particle_density = float(particle_density)
         self.charging_radius = float(charging_radius)
         self.top_seed_radius = float(top_seed_radius)
+        self.max_particle_radius = float(max_particle_radius)
         self.haze_grid_size = int(haze_grid_size)
         self.top_extension_cm = float(top_extension_cm)
         self.sweep_clear_below_z = sweep_clear_below_z
@@ -89,6 +93,10 @@ class McKayTitanHazeModel:
             raise ValueError("`charging_radius` must be positive")
         if self.top_seed_radius <= 0.0:
             raise ValueError("`top_seed_radius` must be positive")
+        if self.max_particle_radius <= 0.0:
+            raise ValueError("`max_particle_radius` must be positive")
+        if self.max_particle_radius < self.top_seed_radius:
+            raise ValueError("`max_particle_radius` must be >= `top_seed_radius`")
         if self.haze_grid_size < 4:
             raise ValueError("`haze_grid_size` must be at least 4")
         if self.top_extension_cm < 0.0:
@@ -570,12 +578,13 @@ class McKayTitanHazeModel:
             dr_dz -= (haze['q_mass'][i]*r_now)/(3.0*C_haze[i])
 
             r_next = r_now + dr_dz*dz
-            r_haze[i - 1] = max(r_next, self.top_seed_radius)
+            r_haze[i - 1] = min(max(r_next, self.top_seed_radius), self.max_particle_radius)
 
         sweep_mask_haze = self._sweep_clear_mask(haze['z'], haze['P'])
         r_haze[sweep_mask_haze] = self.top_seed_radius
         n_haze[sweep_mask_haze] = 0.0
         haze_mass_density[sweep_mask_haze] = 0.0
+        r_haze = np.clip(r_haze, self.top_seed_radius, self.max_particle_radius)
 
         coeffs_final = self._transport_coefficients(r_haze, haze['T'], haze['n_atm'], haze['mubar'], haze['grav'])
         v_settle = coeffs_final['v_settle']
@@ -594,6 +603,7 @@ class McKayTitanHazeModel:
         host_n[sweep_mask_host] = 0.0
         host_mass[sweep_mask_host] = 0.0
         host_r[sweep_mask_host] = self.top_seed_radius
+        host_r = np.clip(host_r, self.top_seed_radius, self.max_particle_radius)
 
         return {
             'haze_grid': {
