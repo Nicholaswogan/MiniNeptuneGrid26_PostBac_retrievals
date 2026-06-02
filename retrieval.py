@@ -43,10 +43,24 @@ def patch_pymultinest_analyse():
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
 
-def untransform(log10u_i):
-    u_i = 10.0**log10u_i
-    x_i = u_i/np.sum(u_i)
-    return x_i
+TRACE_SPECIES = ["O2", "H2O", "CO2", "CH4", "O3", "CO"]
+
+def untransform(log10_trace, bg_h2_fraction):
+    trace = 10.0 ** np.asarray(log10_trace, dtype=float)
+    trace_sum = float(np.sum(trace))
+    if trace_sum >= 1.0:
+        return None
+
+    residual = 1.0 - trace_sum
+    bg_h2_fraction = float(np.clip(bg_h2_fraction, 0.0, 1.0))
+
+    mix = {
+        "N2": residual * (1.0 - bg_h2_fraction),
+        "H2": residual * bg_h2_fraction,
+    }
+    for sp, val in zip(TRACE_SPECIES, trace):
+        mix[sp] = float(val)
+    return mix
 
 def model_raw(x, opacity, R=None):
 
@@ -77,17 +91,17 @@ def model_raw(x, opacity, R=None):
     a = x[9] # in AU
     phase = x[10] # degrees
     log10P_surf = x[11]
-    log10u_i = x[12:]
+    bg_h2_fraction = x[12]
+    log10_trace = x[13:]
     tick("parsed parameters", t0)
 
     # Get mixing ratios
-    species = ['N2', 'O2', 'H2O', 'CO2', 'CH4', 'O3', 'H2', 'CO']
-    mix_i = untransform(log10u_i)
+    species = ['N2', 'H2', 'O2', 'H2O', 'CO2', 'CH4', 'O3', 'CO']
+    mix = untransform(log10_trace, bg_h2_fraction)
+    if mix is None:
+        return np.ones(len(opacity.wno))*np.nan, np.ones(len(opacity.wno))*np.nan, np.ones(len(opacity.wno))*np.nan
     P_surf = 10.0**log10P_surf
 
-    mix = {}
-    for i,sp in enumerate(species):
-        mix[sp] = mix_i[i]
     tick("computed mixing ratios", t0)
 
     # Build atmosphere
@@ -189,14 +203,13 @@ def prior(cube):
     params[9] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[9]) # a
     params[10] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[10]) # phase
     params[11] = quantile_to_uniform(cube[11], -5, 3) # log10P_surf
-    params[12] = quantile_to_uniform(cube[12], -13, 0) # N2
+    params[12] = quantile_to_uniform(cube[12], 0.0, 1.0) # background H2 fraction
     params[13] = quantile_to_uniform(cube[13], -13, 0) # O2
     params[14] = quantile_to_uniform(cube[14], -13, 0) # H2O
     params[15] = quantile_to_uniform(cube[15], -13, 0) # CO2
     params[16] = quantile_to_uniform(cube[16], -13, 0) # CH4
     params[17] = quantile_to_uniform(cube[17], -13, 0) # O3
-    params[18] = quantile_to_uniform(cube[18], -13, 0) # H2
-    params[19] = quantile_to_uniform(cube[19], -13, 0) # CO
+    params[18] = quantile_to_uniform(cube[18], -13, 0) # CO
     return params  
 
 def implicit_priors(x):
@@ -212,9 +225,12 @@ def implicit_priors(x):
     a = x[9]
     phase = x[10]
     log10P_surf = x[11]
-    log10u_i = x[12:]
+    bg_h2_fraction = x[12]
+    log10_trace = x[13:]
 
     if log10_pc >= log10P_surf:
+        return False
+    if np.sum(10.0 ** log10_trace) >= 1.0:
         return False
     
     return True
@@ -306,14 +322,13 @@ def make_cases():
         "a",
         "phase",
         "log10P_surf",
-        "log10u_N2",
-        "log10u_O2",
-        "log10u_H2O",
-        "log10u_CO2",
-        "log10u_CH4",
-        "log10u_O3",
-        "log10u_H2",
-        "log10u_CO",
+        "bg_h2_fraction",
+        "log10_x_O2",
+        "log10_x_H2O",
+        "log10_x_CO2",
+        "log10_x_CH4",
+        "log10_x_O3",
+        "log10_x_CO",
     ]
     with open('data/neptune_20.pkl','rb') as f:
         data = pickle.load(f)
