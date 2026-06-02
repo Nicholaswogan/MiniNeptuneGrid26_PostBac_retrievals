@@ -2,6 +2,8 @@ import warnings
 warnings.filterwarnings('ignore')
 import input_files
 
+import importlib.util
+from pathlib import Path
 import utils
 import numpy as np
 from photochem.utils import stars
@@ -14,9 +16,29 @@ from picaso import justdoit as jdi
 import numba as nb
 from threadpoolctl import threadpool_limits
 import time
+import pymultinest.analyse as pymultinest_analyse
 
 PID = os.getpid()
 LOG_LIKE_COUNT = 0
+
+
+def patch_pymultinest_analyse():
+    """Force pymultinest to use the local Fortran-exponent parser."""
+    local_analyse_path = Path(__file__).with_name("analyse.py")
+    if not local_analyse_path.exists():
+        return
+
+    spec = importlib.util.spec_from_file_location(
+        "_codex_local_pymultinest_analyse",
+        local_analyse_path,
+    )
+    if spec is None or spec.loader is None:
+        return
+
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    pymultinest_analyse.loadtxt2d = module.loadtxt2d
+
 
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
@@ -324,6 +346,7 @@ PRIORS = {
 VERBOSE = False
 
 if __name__ == '__main__':
+    patch_pymultinest_analyse()
     nb.set_num_threads(1)
     _ = threadpool_limits(limits=1)
 
