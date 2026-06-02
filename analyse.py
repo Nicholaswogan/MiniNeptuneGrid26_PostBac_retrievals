@@ -125,6 +125,67 @@ class Analyzer(object):
 		if not hasattr(self, 'equal_weighted_posterior'):
 			self.equal_weighted_posterior = loadtxt2d(self.equal_weighted_file)
 		return self.equal_weighted_posterior
+
+	def get_equal_weighted_posterior_from_data(self, n_samples=None, seed=12345,
+		include_loglike=False, include_weights=False):
+		"""
+			Draw an equal-weight posterior sample directly from [root].txt.
+
+			The first column in [root].txt is treated as the posterior weight,
+			the second column is -2*loglike, and the remaining columns are the
+			physical parameters.
+
+			@param n_samples:
+				Number of equal-weight draws to return. Defaults to the MultiNest
+				estimate npost = nint(exp(-sum(w log w))), matching posterior.F90.
+			@param seed:
+				Random seed used for the stochastic rounding step.
+			@param include_loglike:
+				If True, include the -2*loglike column in the returned samples.
+			@param include_weights:
+				If True, include the original posterior weight column in the
+				returned samples.
+		"""
+		data = self.get_data()
+		if data.ndim != 2 or data.shape[1] < 3:
+			raise ValueError("MultiNest data must be a 2D array with at least 3 columns")
+
+		weights = numpy.asarray(data[:, 0], dtype=float)
+		weights = numpy.clip(weights, 0.0, numpy.inf)
+		weight_sum = float(weights.sum())
+		if not numpy.isfinite(weight_sum) or weight_sum <= 0.0:
+			raise ValueError("Cannot resample posterior: weights are non-positive or non-finite")
+		weights = weights / weight_sum
+
+		if n_samples is None:
+			mask = weights > 0.0
+			entropy = -numpy.sum(weights[mask] * numpy.log(weights[mask]))
+			n_samples = int(numpy.rint(numpy.exp(entropy)))
+		n_samples = int(n_samples)
+		if n_samples <= 0:
+			raise ValueError("n_samples must be positive")
+
+		rng = numpy.random.default_rng(seed)
+		expected = weights * n_samples
+		multiplicity = numpy.floor(expected).astype(int)
+		remainder = expected - multiplicity
+		multiplicity += (rng.random(data.shape[0]) <= remainder).astype(int)
+		indices = numpy.repeat(numpy.arange(data.shape[0]), multiplicity)
+		if indices.size == 0:
+			raise ValueError("Resampling produced no posterior draws")
+		if indices.size != n_samples:
+			# Match MultiNest's rounded-multiplicity behavior as closely as possible,
+			# but allow the stochastic rounding to shift the final count slightly.
+			n_samples = indices.size
+
+		columns = []
+		if include_weights:
+			columns.append(data[indices, 0:1])
+		if include_loglike:
+			columns.append(data[indices, 1:2])
+		columns.append(data[indices, 2:])
+
+		return numpy.hstack(columns)
 	
 	def _read_error_line(self, l):
 		#print('_read_error_line -> line>', l)
@@ -277,4 +338,3 @@ class Analyzer(object):
 		lastrow = data[i]
 		return {'log_likelihood': float(-0.5 * lastrow[1]),
 			'parameters': list(lastrow[2:])}
-
