@@ -3,6 +3,9 @@ warnings.filterwarnings('ignore')
 import input_files
 
 import importlib.util
+from functools import lru_cache
+from functools import partial
+from scipy import optimize
 from pathlib import Path
 import utils
 import numpy as np
@@ -17,10 +20,9 @@ import numba as nb
 from threadpoolctl import threadpool_limits
 import time
 import pymultinest.analyse as pymultinest_analyse
+import truths
 
 PID = os.getpid()
-LOG_LIKE_COUNT = 0
-
 
 def patch_pymultinest_analyse():
     """Force pymultinest to use the local Fortran-exponent parser."""
@@ -190,40 +192,99 @@ def model_raw(x, opacity, R=None):
     return wv, albedo, fpfs
 
 def inverse_zeng_Mp_Rp_relation(radius, CMF):
+    "Rocky planet M-R curves"
     mass = (radius/(1.07 - 0.21*CMF))**3.7
     return mass
 
-def mass_middle(radius, radius1):
-    mass1 = inverse_zeng_Mp_Rp_relation(radius1, 0.0)
-    x1, y1 = np.log10(radius1), np.log10(mass1)
-    x2, y2 = np.log10(4), np.log10(2.5)
-    slope = (y2 - y1)/(x2 - x1)
-    intercept = y1 - slope*x1
-    log10mass = slope*np.log10(radius) + intercept
-    mass = 10.0**log10mass
+def zeng_water(radius):
+    "100% water M-R curve"
+    log10R = np.array([
+        -0.23657201, -0.20065945, -0.16411927, -0.12755235, -0.09140776,
+        -0.05601112, -0.02159121,  0.01199311,  0.04414762,  0.07554696,
+        0.10585067,  0.1354507 ,  0.16465022,  0.19368103,  0.22245634,
+        0.2509077 ,  0.27898212,  0.30599588,  0.33183204,  0.35679046,
+        0.38039216,  0.40294883,  0.42488164,  0.44544851,  0.46463856,
+        0.4827307 ,  0.49968708,  0.51560895,  0.53058386,  0.54481191,
+        0.55822842,  0.57100967,  0.58274497,  0.593729  ,  0.60390183,
+        0.61320735,  0.62148786,  0.62900162,  0.63568476,  0.64167237,
+        0.64689362,  0.65156874,  0.65561858,  0.65906007,  0.66200188,
+        0.66445393,  0.66642437,  0.66801297,  0.66922387
+    ])
+    log10M = np.array([
+        -1.33133458, -1.20943337, -1.08576265, -0.96217525, -0.84013215,
+        -0.72033306, -0.60310355, -0.48825029, -0.37613073, -0.26632134,
+        -0.1587657 , -0.05227227,  0.05384643,  0.15956719,  0.26505379,
+        0.37032801,  0.47494434,  0.57634135,  0.67531998,  0.77151399,
+        0.86480763,  0.95607234,  1.04571406,  1.1319393 ,  1.21537315,
+        1.29600667,  1.3743817 ,  1.45040309,  1.52491515,  1.59791447,
+        1.66950283,  1.73973053,  1.8076703 ,  1.87384353,  1.93876982,
+        2.00130093,  2.06182931,  2.1202448 ,  2.17695898,  2.23248787,
+        2.28690535,  2.33984878,  2.39199307,  2.44294987,  2.49317912,
+        2.54245195,  2.59117595,  2.63938687,  2.68699357
+    ])
+
+    log10radius = np.log10(radius)
+    if log10radius > log10R[-1] or log10radius < log10R[0]:
+        raise ValueError
+    
+    mass = 10.0**np.interp(np.log10(radius), log10R, log10M)
     return mass
 
-def mass_big(radius, radius1, radius2):
-    mass2 = mass_middle(radius2, radius1)
-    x1, y1 = np.log10(radius2), np.log10(mass2)
-    x2, y2 = np.log10(4), np.log10(4.0)
-    slope = (y2 - y1)/(x2 - x1)
-    intercept = y1 - slope*x1
-    log10mass = slope*np.log10(radius) + intercept
-    mass = 10.0**log10mass
-    return mass
+def helper(fcn, radius, radius1):
 
-def mass_biggest(radius, radius1, radius2, radius3):
-    mass3 = mass_big(radius3, radius1, radius2)
-    x1, y1 = np.log10(radius3), np.log10(mass3)
-    x2, y2 = np.log10(10), np.log10(3)
-    slope = (y2 - y1)/(x2 - x1)
-    intercept = y1 - slope*x1
-    log10mass = slope*np.log10(radius) + intercept
-    mass = 10.0**log10mass
-    return mass
+    radii = np.array([
+        1.7, 3.0, 5.0, 10.1
+    ])
+
+    points = np.array([
+        [np.log10(1.7), np.log10(1.5)],
+        [np.log10(4), np.log10(2.5)],
+        [np.log10(4), np.log10(4.0)],
+        [np.log10(10), np.log10(3)],
+    ])
+
+    
+    if radius < radius1:
+        mass = fcn(radius)
+        return mass
+
+    mass1 = fcn(radius1)
+    for i in range(len(radii)):
+        if radius < radii[i]:
+            Rp = radius
+        else:
+            Rp = radii[i]
+        x1, y1 = np.log10(radius1), np.log10(mass1)
+        x2, y2 = points[i, :]
+        slope = (y2 - y1)/(x2 - x1)
+        intercept = y1 - slope*x1
+        log10mass = slope*np.log10(Rp) + intercept
+        mass = 10.0**log10mass
+        
+        if radius < radii[i]:
+            return mass
+        else:
+            radius1 = radii[i]
+            mass1 = mass
+        
+    raise ValueError
+
+@lru_cache(maxsize=1)
+def find_empirical_and_water_root():
+    "Gets intersection between emprical min mass and Zeng water curve."
+    def obj(radius):
+        return min_mass_empirical(radius) - zeng_water(radius)
+    sol = optimize.root_scalar(obj, method='brentq', bracket=[1.0, 2.0], rtol=1.0e-9)
+    assert sol.converged
+    return sol.root
+
+def min_mass(radius):
+    "Minimum possible mass for a given radius"
+    radius1 = find_empirical_and_water_root()
+    return helper(zeng_water, radius, radius1)
 
 def max_mass(radius):
+    "Maximum possible mass for a given radius"
 
     radius1 = 2.4
     
@@ -239,31 +300,36 @@ def max_mass(radius):
         mass = 10.0**log10mass
 
     return mass
-        
-def min_mass(radius):
 
-    radius1 = 1.1
-    radius2 = 3.0
-    radius3 = 5.0
+def min_mass_empirical(radius):
+    "Minimum mass of planets based on observations"
+    
+    radius1 = 1.25
+    
+    def fcn(r):
+        return inverse_zeng_Mp_Rp_relation(r, 0)
 
-    if radius < radius1:
-        mass = inverse_zeng_Mp_Rp_relation(radius, 0.0)
-    elif radius >= radius1 and radius < radius2:
-        mass = mass_middle(radius, radius1)
-    elif radius >= radius2 and radius < radius3:
-        mass = mass_big(radius, radius1, radius2)
-    else:
-        mass = mass_biggest(radius, radius1, radius2, radius3)
+    return helper(fcn, radius, radius1)
+
+def max_mass_notrocky(radius):
+    "Maximum mass of a planet that is not rocky (and empirical)"
+
+    if radius > 1.7:
+        return max_mass(radius)
+
+    mass = inverse_zeng_Mp_Rp_relation(radius, 0.0)
     return mass
 
 def sample_mass_within_radius_bounds(quantile, log10_Rp):
     radius = 10.0**log10_Rp
     mass1 = min_mass(radius)
     mass2 = max_mass(radius)
-    mass = quantile_to_uniform(quantile, mass1, mass2)
-    return np.log10(mass)
+    if mass1 <= 0.0 or mass2 <= 0.0:
+        raise ValueError("Mass bounds must be positive")
+    log10_mass = quantile_to_uniform(quantile, np.log10(mass1), np.log10(mass2))
+    return log10_mass
 
-def prior(cube):
+def _prior_common(cube):
     params = np.zeros_like(cube)
     params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
     params[1] = quantile_to_uniform(cube[1], -2, 0) # log10_As
@@ -272,20 +338,49 @@ def prior(cube):
     params[4] = quantile_to_uniform(cube[4], -3, 3) # log10_tauc
     params[5] = quantile_to_uniform(cube[5], np.log10(1.0e-14*1.0e-8), np.log10(1.0e-14*1.0e2)) # log10_haze_prod
     params[6] = quantile_to_uniform(cube[6], -3, 0) # log10_fc
-    params[7] = quantile_to_uniform(cube[7], -1, 1) # log10_Rp
-    params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
+    params[7] = quantile_to_uniform(cube[7], np.log10(0.6), 1) # log10_Rp
+
     params[9] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[9]) # a
     params[10] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[10]) # phase
     params[11] = quantile_to_uniform(cube[11], -5, 3) # log10P_surf
     params[12] = quantile_to_uniform(cube[12], 0.0, 1.0) # background H2 fraction
-    params[13] = quantile_to_uniform(cube[13], -13, 0) # O2
-    params[14] = quantile_to_uniform(cube[14], -13, 0) # H2O
-    params[15] = quantile_to_uniform(cube[15], -13, 0) # CO2
-    params[16] = quantile_to_uniform(cube[16], -13, 0) # CH4
-    params[17] = quantile_to_uniform(cube[17], -13, 0) # O3
-    params[18] = quantile_to_uniform(cube[18], -13, 0) # CO
-    params[19] = quantile_to_uniform(cube[19], -13, 0) # NH3
-    return params  
+    params[13] = quantile_to_uniform(cube[13], -10, 0) # O2
+    params[14] = quantile_to_uniform(cube[14], -10, 0) # H2O
+    params[15] = quantile_to_uniform(cube[15], -10, 0) # CO2
+    params[16] = quantile_to_uniform(cube[16], -10, 0) # CH4
+    params[17] = quantile_to_uniform(cube[17], -10, 0) # O3
+    params[18] = quantile_to_uniform(cube[18], -10, 0) # CO
+    params[19] = quantile_to_uniform(cube[19], -10, 0) # NH3
+    return params
+
+def prior_base(cube):
+    params = _prior_common(cube)
+    params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
+    return params
+
+def prior_masserr(cube, mass_mean, mass_error_frac):
+    params = _prior_common(cube)
+
+    radius = 10.0**params[7]
+    mass1, mass2 = min_mass(radius), max_mass(radius)
+
+    if mass_mean <= 0.0:
+        raise ValueError("mass_mean must be positive")
+    if mass_error_frac <= 0.0:
+        raise ValueError("mass_error_frac must be positive")
+    if mass1 <= 0.0:
+        raise ValueError("Physical mass lower bound must be positive")
+
+    sigma = mass_mean * mass_error_frac
+    a = (mass1 - mass_mean) / sigma
+    b = (mass2 - mass_mean) / sigma
+    mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[8])
+    params[8] = np.log10(mass)  # log10_Mp
+
+    return params
+
+def make_priors(mass_mean, mass_error_frac):
+    return partial(prior_masserr, mass_mean=mass_mean, mass_error_frac=mass_error_frac)
 
 def implicit_priors(x):
     T = x[0]
@@ -325,62 +420,36 @@ def model(x, opacity, wv_bins):
     
     return fpfs
 
-def loglike(cube, data_name):
-    global LOG_LIKE_COUNT
-    LOG_LIKE_COUNT += 1
-    eval_id = LOG_LIKE_COUNT
-    t0 = time.time()
+def make_loglike(model, opacity, data_dict):
 
-    if VERBOSE:
-        print(f"pid={PID}: entered loglike #{eval_id} ({data_name})", flush=True)
+    def loglike(cube):
+        data_bins = data_dict['bins']
+        y = data_dict['fpfs']
+        e = data_dict['err']
+        resulty = model(cube, opacity, data_bins)
+        if np.any(np.isnan(resulty)):
+            return -1.0e100
+        loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
+        return loglikelihood
+    
+    return loglike
 
-    data_dict = DATA_DICTS[data_name]
-    data_bins = data_dict['bins']
-    y = data_dict['fpfs']
-    e = data_dict['err']
+def make_loglike_prior(data_dict, param_names, model, model_raw, opacity, prior):
 
-    if VERBOSE:
-        print(f"pid={PID}: before model() #{eval_id}", flush=True)
+    loglike = make_loglike(model, opacity, data_dict)
 
-    t_model0 = time.time()
-    resulty = model(cube, OPACITY, data_bins)
-    t_model1 = time.time()
+    out = {
+        'loglike': loglike,
+        'data_dict': data_dict,
+        'param_names': param_names,
+        'model': model,
+        'model_raw': model_raw,
+        'opacity': opacity,
+        'prior': prior,
+    }
 
-    model_time = t_model1 - t_model0
-    total_time = t_model1 - t0
+    return out
 
-    if VERBOSE:
-        print(
-            f"pid={PID}: after model() #{eval_id}; "
-            f"model_time={model_time:.2f}s total_time={total_time:.2f}s",
-            flush=True
-        )
-
-    if np.any(np.isnan(resulty)):
-        if VERBOSE:
-            print(
-                f"pid={PID}: returning -1e100 (nan) #{eval_id}; "
-                f"model_time={model_time:.2f}s total_time={total_time:.2f}s",
-                flush=True
-            )
-        return -1.0e100
-
-    loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
-
-    if VERBOSE:
-        print(
-            f"pid={PID}: returning loglike #{eval_id} = {loglikelihood:.6e}; "
-            f"model_time={model_time:.2f}s total_time={total_time:.2f}s",
-            flush=True
-        )
-
-    return loglikelihood
-
-def loglike_clear(cube):
-    return loglike(cube, 'clear')
-
-def loglike_hazy(cube):
-    return loglike(cube, 'hazy')
 
 def make_cases():
 
@@ -406,42 +475,78 @@ def make_cases():
         "log10_x_CO",
         "log10_x_NH3",
     ]
-    with open('data/neptune_20.pkl','rb') as f:
-        data = pickle.load(f)
 
-    retrieval_names = ['clear', 'hazy']
-    data_dicts = {
-        'clear': data['clear'],
-        'hazy': data['hazy'],
-    }
-    param_names_out = {
-        'clear': param_names,
-        'hazy': param_names
-    }
+    data_dicts = truths.make_data()
 
-    return retrieval_names, data_dicts, param_names_out
+    cases = {}
+
+    # Mini-Neptune no mass constraint
+    cases['neptune_clear_nomass'] = make_loglike_prior(
+        data_dict=data_dicts['neptune_clear'], 
+        param_names=param_names, 
+        model=model, 
+        model_raw=model_raw, 
+        opacity=OPACITY, 
+        prior=prior_base
+    )
+
+    # Mini-Neptune w/ mass constraint
+    truth = data_dicts['neptune_clear']['truth']
+    mass = 10.0**truth[8]
+    prior = make_priors(
+        mass_mean=mass,
+        mass_error_frac=0.3,
+    )
+    cases['neptune_clear_mass'] = make_loglike_prior(
+        data_dict=data_dicts['neptune_clear'], 
+        param_names=param_names, 
+        model=model, 
+        model_raw=model_raw, 
+        opacity=OPACITY, 
+        prior=prior
+    )
+
+    # Archean Earth no mass constraint
+    cases['archean_clear_nomass'] = make_loglike_prior(
+        data_dict=data_dicts['archean_clear'], 
+        param_names=param_names, 
+        model=model, 
+        model_raw=model_raw, 
+        opacity=OPACITY, 
+        prior=prior_base
+    )
+
+    # Archean Earth w/ mass constraint
+    truth = data_dicts['archean_clear']['truth']
+    mass = 10.0**truth[8]
+    prior = make_priors(
+        mass_mean=mass,
+        mass_error_frac=0.3,
+    )
+    cases['archean_clear_mass'] = make_loglike_prior(
+        data_dict=data_dicts['archean_clear'], 
+        param_names=param_names, 
+        model=model, 
+        model_raw=model_raw, 
+        opacity=OPACITY, 
+        prior=prior
+    )
+
+    return cases
 
 OPACITY = jdi.opannection(
-    wave_range=[0.4,1.85],
+    wave_range=[0.44,1.01],
     filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
 )
-RETRIEVAL_NAMES, DATA_DICTS, PARAM_NAMES = make_cases()
-LOGLIKES = {
-    'clear': loglike_clear,
-    'hazy': loglike_hazy,
-}
-PRIORS = {
-    'clear': prior,
-    'hazy': prior
-}
-VERBOSE = False
+RETRIEVAL_CASES = make_cases()
+VERBOSE = True
 
 if __name__ == '__main__':
     patch_pymultinest_analyse()
     nb.set_num_threads(1)
     _ = threadpool_limits(limits=1)
 
-    models_to_run = RETRIEVAL_NAMES
+    models_to_run = list(RETRIEVAL_CASES.keys())
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
@@ -451,15 +556,13 @@ if __name__ == '__main__':
             pass
 
         # Do nested sampling
-        print(f"pid={PID}: starting solve for {model_name}", flush=True)
         results = solve(
-            LogLikelihood=LOGLIKES[model_name], 
-            Prior=PRIORS[model_name], 
-            n_dims=len(PARAM_NAMES[model_name]), 
+            LogLikelihood=RETRIEVAL_CASES[model_name]['loglike'], 
+            Prior=RETRIEVAL_CASES[model_name]['prior'], 
+            n_dims=len(RETRIEVAL_CASES[model_name]['param_names']), 
             outputfiles_basename=outputfiles_basename, 
             verbose=True,
             n_live_points=1000
         )
         # Save pickle
-        with open(outputfiles_basename + ".pkl", "wb") as f:
-            pickle.dump(results, f)
+        pickle.dump(results, open(outputfiles_basename+'.pkl','wb'))

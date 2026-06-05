@@ -34,6 +34,8 @@ def get_spectrum(df):
 
 def _pressure_weighted_mean(atm, key, pmax=100.0):
     """Pressure-weighted mean from TOA down to pmax (bar)."""
+    if key not in atm:
+        return 0.0
     p = np.asarray(atm["pressure"], dtype=float)
     x = np.asarray(atm[key], dtype=float)
     mask = np.isfinite(p) & np.isfinite(x) & (p <= pmax)
@@ -49,30 +51,45 @@ def _pressure_weighted_mean(atm, key, pmax=100.0):
     return float(np.trapz(x, p) / np.trapz(np.ones_like(p), p))
 
 
-def build_effective_truth(atm, haze_log10_prod, surface_log10_albedo=-2.0):
+def build_effective_truth(
+    atm,
+    haze_log10_prod,
+    surface_log10_albedo=-2.0,
+    planet_radius=2.0,
+    planet_mass=4.66,
+    cloud_log10_P_bottom=np.log10(0.0404),
+    cloud_log10_P_thick=np.log10(0.7) - np.log10(0.6),
+    cloud_opd=10.0,
+    cloud_frac=0.5,
+    semi_major=1.0,
+    phase=90.0,
+    surface_pressure=100.0,
+):
     """Construct a 20-parameter retrieval-space truth vector.
 
     The vector is a proxy truth in the retrieval parameterization, not a literal
     one-to-one mapping of the physical photochemical atmosphere.
     """
-    p_eff = 100.0
     truth = np.zeros(20, dtype=float)
+    pmax = surface_pressure
+    cloud_top_pressure = 10.0 ** cloud_log10_P_bottom * 10.0 ** (-cloud_log10_P_thick)
+    cloud_thickness = 10.0 ** cloud_log10_P_bottom - cloud_top_pressure
 
-    truth[0] = _pressure_weighted_mean(atm, "temperature", pmax=p_eff)
+    truth[0] = _pressure_weighted_mean(atm, "temperature", pmax=pmax)
     truth[1] = surface_log10_albedo
-    truth[2] = np.log10(p_eff)
-    truth[3] = np.log10(0.7) - np.log10(0.6)
-    truth[4] = np.log10(10.0)
+    truth[2] = np.log10(cloud_top_pressure)
+    truth[3] = np.log10(cloud_thickness)
+    truth[4] = np.log10(cloud_opd)
     truth[5] = haze_log10_prod
-    truth[6] = np.log10(0.5)
-    truth[7] = np.log10(2.0)
-    truth[8] = np.log10(4.66)
-    truth[9] = 1.0
-    truth[10] = 90.0
-    truth[11] = np.log10(p_eff)
+    truth[6] = np.log10(cloud_frac)
+    truth[7] = np.log10(planet_radius)
+    truth[8] = np.log10(planet_mass)
+    truth[9] = semi_major
+    truth[10] = phase
+    truth[11] = np.log10(surface_pressure)
 
-    n2 = _pressure_weighted_mean(atm, "N2", pmax=p_eff)
-    h2 = _pressure_weighted_mean(atm, "H2", pmax=p_eff)
+    n2 = _pressure_weighted_mean(atm, "N2", pmax=pmax)
+    h2 = _pressure_weighted_mean(atm, "H2", pmax=pmax)
     bg_total = n2 + h2
     if bg_total > 0.0:
         truth[12] = h2 / bg_total
@@ -81,9 +98,61 @@ def build_effective_truth(atm, haze_log10_prod, surface_log10_albedo=-2.0):
 
     trace_species = ["O2", "H2O", "CO2", "CH4", "O3", "CO", "NH3"]
     for i, sp in enumerate(trace_species, start=13):
-        truth[i] = np.log10(max(_pressure_weighted_mean(atm, sp, pmax=p_eff), 1e-300))
+        truth[i] = np.log10(max(_pressure_weighted_mean(atm, sp, pmax=pmax), 1e-300))
 
     return truth
+
+
+def _build_neptune_truth():
+    atm = pd.DataFrame(get_elizabeth_atm())
+    return build_effective_truth(
+        atm,
+        haze_log10_prod=np.log10(3.0e-14 * 1.0e-100),
+        surface_log10_albedo=-2.0,
+        planet_radius=2.0,
+        planet_mass=4.66,
+        cloud_log10_P_bottom=np.log10(0.0404),
+        cloud_log10_P_thick=np.log10(0.7) - np.log10(0.6),
+        cloud_opd=10.0,
+        cloud_frac=0.5,
+        semi_major=1.0,
+        phase=90.0,
+        surface_pressure=100.0,
+    )
+
+
+def _build_archean_truth():
+    mix = {
+        "N2": 0.945,
+        "CO2": 0.05,
+        "CO": 0.0005,
+        "CH4": 0.005,
+        "H2O": 0.003,
+    }
+    ftot = sum(mix.values())
+    for key in mix:
+        mix[key] /= ftot
+
+    pressure = np.logspace(-8, np.log10(1), 100)
+    atm = jdi.inputs().TP_line_earth(pressure)
+    for key in mix:
+        atm[key] = np.ones_like(pressure) * mix[key]
+    atm = pd.DataFrame(atm)
+
+    return build_effective_truth(
+        atm,
+        haze_log10_prod=np.log10(3.0e-14 * 1.0e-100),
+        surface_log10_albedo=np.log10(0.05),
+        planet_radius=1.0,
+        planet_mass=1.0,
+        cloud_log10_P_bottom=np.log10(0.7),
+        cloud_log10_P_thick=np.log10(0.7) - np.log10(0.6),
+        cloud_opd=10.0,
+        cloud_frac=0.5,
+        semi_major=1.0,
+        phase=90.0,
+        surface_pressure=1.0,
+    )
 
 def neptune_spectra():
 
@@ -395,12 +464,14 @@ def make_data():
         spectra = pickle.load(f)
     _, wavl, _, fpfs = spectra['clear']
     data_dict_neptune = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
+    data_dict_neptune['truth'] = _build_neptune_truth()
 
     # Archean
     with open('data/archean.pkl', 'rb') as f:
         spectra = pickle.load(f)
     _, wavl, _, fpfs = spectra['clear']
     data_dict_archean = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
+    data_dict_archean['truth'] = _build_archean_truth()
 
     data = {
         'neptune_clear': data_dict_neptune,
