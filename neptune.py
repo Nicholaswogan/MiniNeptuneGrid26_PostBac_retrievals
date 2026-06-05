@@ -31,6 +31,60 @@ def get_spectrum(df):
 
     return wv, wavl, albedo, fpfs
 
+
+def _pressure_weighted_mean(atm, key, pmax=100.0):
+    """Pressure-weighted mean from TOA down to pmax (bar)."""
+    p = np.asarray(atm["pressure"], dtype=float)
+    x = np.asarray(atm[key], dtype=float)
+    mask = np.isfinite(p) & np.isfinite(x) & (p <= pmax)
+    if not np.any(mask):
+        raise ValueError(f"No finite values found for {key} below {pmax} bar")
+    p = p[mask]
+    x = x[mask]
+    order = np.argsort(p)
+    p = p[order]
+    x = x[order]
+    if p.size == 1:
+        return float(x[0])
+    return float(np.trapz(x, p) / np.trapz(np.ones_like(p), p))
+
+
+def build_effective_truth(atm, haze_log10_prod, surface_log10_albedo=-2.0):
+    """Construct a 20-parameter retrieval-space truth vector.
+
+    The vector is a proxy truth in the retrieval parameterization, not a literal
+    one-to-one mapping of the physical photochemical atmosphere.
+    """
+    p_eff = 100.0
+    truth = np.zeros(20, dtype=float)
+
+    truth[0] = _pressure_weighted_mean(atm, "temperature", pmax=p_eff)
+    truth[1] = surface_log10_albedo
+    truth[2] = np.log10(p_eff)
+    truth[3] = np.log10(0.7) - np.log10(0.6)
+    truth[4] = np.log10(10.0)
+    truth[5] = haze_log10_prod
+    truth[6] = np.log10(0.5)
+    truth[7] = np.log10(2.0)
+    truth[8] = np.log10(4.66)
+    truth[9] = 1.0
+    truth[10] = 90.0
+    truth[11] = np.log10(p_eff)
+
+    n2 = _pressure_weighted_mean(atm, "N2", pmax=p_eff)
+    h2 = _pressure_weighted_mean(atm, "H2", pmax=p_eff)
+    bg_total = n2 + h2
+    if bg_total > 0.0:
+        truth[12] = h2 / bg_total
+    else:
+        truth[12] = 0.5
+
+    trace_species = ["O2", "H2O", "CO2", "CH4", "O3", "CO", "NH3"]
+    for i, sp in enumerate(trace_species, start=13):
+        truth[i] = np.log10(max(_pressure_weighted_mean(atm, sp, pmax=p_eff), 1e-300))
+
+    return truth
+
 def neptune_spectra():
 
     opacity = jdi.opannection(
@@ -205,12 +259,24 @@ def make_neptune_data(snr):
     fpfs_signal = 4.0e-10
 
     out = neptune_spectra()
+    atm_truth = get_elizabeth_atm()
+
+    truth_hazy = build_effective_truth(
+        atm_truth,
+        haze_log10_prod=np.log10(3.0e-14),
+    )
+    truth_clear = build_effective_truth(
+        atm_truth,
+        haze_log10_prod=-22.0,
+    )
 
     _, wavl, _, fpfs = out['not_hazy']
     data_dict_clear = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
+    data_dict_clear['truth'] = truth_clear
 
     _, wavl, _, fpfs = out['hazy']
     data_dict_hazy = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
+    data_dict_hazy['truth'] = truth_hazy
 
     data = {
         'clear': data_dict_clear,

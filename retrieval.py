@@ -43,7 +43,7 @@ def patch_pymultinest_analyse():
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
 
-TRACE_SPECIES = ["O2", "H2O", "CO2", "CH4", "O3", "CO"]
+TRACE_SPECIES = ["O2", "H2O", "CO2", "CH4", "O3", "CO", "NH3"]
 
 def untransform(log10_trace, bg_h2_fraction):
     trace = 10.0 ** np.asarray(log10_trace, dtype=float)
@@ -96,7 +96,7 @@ def model_raw(x, opacity, R=None):
     tick("parsed parameters", t0)
 
     # Get mixing ratios
-    species = ['N2', 'H2', 'O2', 'H2O', 'CO2', 'CH4', 'O3', 'CO']
+    species = ['N2', 'H2', 'O2', 'H2O', 'CO2', 'CH4', 'O3', 'CO', 'NH3']
     mix = untransform(log10_trace, bg_h2_fraction)
     if mix is None:
         return np.ones(len(opacity.wno))*np.nan, np.ones(len(opacity.wno))*np.nan, np.ones(len(opacity.wno))*np.nan
@@ -189,6 +189,80 @@ def model_raw(x, opacity, R=None):
 
     return wv, albedo, fpfs
 
+def inverse_zeng_Mp_Rp_relation(radius, CMF):
+    mass = (radius/(1.07 - 0.21*CMF))**3.7
+    return mass
+
+def mass_middle(radius, radius1):
+    mass1 = inverse_zeng_Mp_Rp_relation(radius1, 0.0)
+    x1, y1 = np.log10(radius1), np.log10(mass1)
+    x2, y2 = np.log10(4), np.log10(2.5)
+    slope = (y2 - y1)/(x2 - x1)
+    intercept = y1 - slope*x1
+    log10mass = slope*np.log10(radius) + intercept
+    mass = 10.0**log10mass
+    return mass
+
+def mass_big(radius, radius1, radius2):
+    mass2 = mass_middle(radius2, radius1)
+    x1, y1 = np.log10(radius2), np.log10(mass2)
+    x2, y2 = np.log10(4), np.log10(4.0)
+    slope = (y2 - y1)/(x2 - x1)
+    intercept = y1 - slope*x1
+    log10mass = slope*np.log10(radius) + intercept
+    mass = 10.0**log10mass
+    return mass
+
+def mass_biggest(radius, radius1, radius2, radius3):
+    mass3 = mass_big(radius3, radius1, radius2)
+    x1, y1 = np.log10(radius3), np.log10(mass3)
+    x2, y2 = np.log10(10), np.log10(3)
+    slope = (y2 - y1)/(x2 - x1)
+    intercept = y1 - slope*x1
+    log10mass = slope*np.log10(radius) + intercept
+    mass = 10.0**log10mass
+    return mass
+
+def max_mass(radius):
+
+    radius1 = 2.4
+    
+    if radius < radius1:
+        mass = inverse_zeng_Mp_Rp_relation(radius, 1.0)
+    else:
+        mass1 = inverse_zeng_Mp_Rp_relation(radius1, 1.0)
+        x1, y1 = np.log10(radius1), np.log10(mass1)
+        x2, y2 = np.log10(7), np.log10(300.0)
+        slope = (y2 - y1)/(x2 - x1)
+        intercept = y1 - slope*x1
+        log10mass = slope*np.log10(radius) + intercept
+        mass = 10.0**log10mass
+
+    return mass
+        
+def min_mass(radius):
+
+    radius1 = 1.1
+    radius2 = 3.0
+    radius3 = 5.0
+
+    if radius < radius1:
+        mass = inverse_zeng_Mp_Rp_relation(radius, 0.0)
+    elif radius >= radius1 and radius < radius2:
+        mass = mass_middle(radius, radius1)
+    elif radius >= radius2 and radius < radius3:
+        mass = mass_big(radius, radius1, radius2)
+    else:
+        mass = mass_biggest(radius, radius1, radius2, radius3)
+    return mass
+
+def sample_mass_within_radius_bounds(quantile, log10_Rp):
+    radius = 10.0**log10_Rp
+    mass1 = min_mass(radius)
+    mass2 = max_mass(radius)
+    mass = quantile_to_uniform(quantile, mass1, mass2)
+    return np.log10(mass)
+
 def prior(cube):
     params = np.zeros_like(cube)
     params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
@@ -199,7 +273,7 @@ def prior(cube):
     params[5] = quantile_to_uniform(cube[5], np.log10(1.0e-14*1.0e-8), np.log10(1.0e-14*1.0e2)) # log10_haze_prod
     params[6] = quantile_to_uniform(cube[6], -3, 0) # log10_fc
     params[7] = quantile_to_uniform(cube[7], -1, 1) # log10_Rp
-    params[8] = quantile_to_uniform(cube[8], -1, 2) # log10_Mp
+    params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
     params[9] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[9]) # a
     params[10] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[10]) # phase
     params[11] = quantile_to_uniform(cube[11], -5, 3) # log10P_surf
@@ -210,6 +284,7 @@ def prior(cube):
     params[16] = quantile_to_uniform(cube[16], -13, 0) # CH4
     params[17] = quantile_to_uniform(cube[17], -13, 0) # O3
     params[18] = quantile_to_uniform(cube[18], -13, 0) # CO
+    params[19] = quantile_to_uniform(cube[19], -13, 0) # NH3
     return params  
 
 def implicit_priors(x):
@@ -329,6 +404,7 @@ def make_cases():
         "log10_x_CH4",
         "log10_x_O3",
         "log10_x_CO",
+        "log10_x_NH3",
     ]
     with open('data/neptune_20.pkl','rb') as f:
         data = pickle.load(f)
