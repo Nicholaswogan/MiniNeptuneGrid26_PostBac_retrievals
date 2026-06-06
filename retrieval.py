@@ -539,7 +539,7 @@ OPACITY = jdi.opannection(
     filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
 )
 RETRIEVAL_CASES = make_cases()
-VERBOSE = True
+VERBOSE = False
 
 if __name__ == '__main__':
     patch_pymultinest_analyse()
