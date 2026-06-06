@@ -556,6 +556,7 @@ if __name__ == '__main__':
             pass
 
         # Do nested sampling
+        print(f"pid={PID}: starting solve for {model_name}", flush=True)
         results = solve(
             LogLikelihood=RETRIEVAL_CASES[model_name]['loglike'], 
             Prior=RETRIEVAL_CASES[model_name]['prior'], 
