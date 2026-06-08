@@ -342,7 +342,7 @@ def _prior_common(cube):
 
     params[9] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[9]) # a
     params[10] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[10]) # phase
-    params[11] = quantile_to_uniform(cube[11], -5, 3) # log10P_surf
+
     params[12] = quantile_to_uniform(cube[12], 0.0, 1.0) # background H2 fraction
     params[13] = quantile_to_uniform(cube[13], -10, 0) # O2
     params[14] = quantile_to_uniform(cube[14], -10, 0) # H2O
@@ -356,6 +356,7 @@ def _prior_common(cube):
 def prior_base(cube):
     params = _prior_common(cube)
     params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
+    params[11] = realistic_pressure_prior(cube[11], params[8], params[7]) # log10P_surf
     return params
 
 def prior_masserr(cube, mass_mean, mass_error_frac):
@@ -377,10 +378,40 @@ def prior_masserr(cube, mass_mean, mass_error_frac):
     mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[8])
     params[8] = np.log10(mass)  # log10_Mp
 
+    params[11] = realistic_pressure_prior(cube[11], params[8], params[7]) # log10P_surf
+
     return params
 
 def make_priors(mass_mean, mass_error_frac):
     return partial(prior_masserr, mass_mean=mass_mean, mass_error_frac=mass_error_frac)
+
+@lru_cache(maxsize=1)
+def find_max_and_water_root():
+    def obj(radius):
+        return max_mass(radius) - zeng_water(radius)
+    sol = optimize.root_scalar(obj, method='brentq', bracket=[3.0, 4.6], rtol=1.0e-9)
+    assert sol.converged
+    return sol.root
+
+def must_have_thick_atmosphere(mass, radius):
+    "A planet must have a very thick atmosphere if above the 100% water composition curve."
+
+    if radius > find_max_and_water_root():
+        return True
+
+    if mass < zeng_water(radius):
+        return True
+    
+    return False
+
+def realistic_pressure_prior(quantile, log10_Mp, log10_Rp):
+    mass = 10.0**log10_Mp
+    radius = 10.0**log10_Rp
+
+    if must_have_thick_atmosphere(mass, radius):
+        return quantile_to_uniform(quantile, 2.9, 3)
+    else:
+        return quantile_to_uniform(quantile, -5, 3)
 
 def implicit_priors(x):
     T = x[0]
