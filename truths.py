@@ -5,6 +5,7 @@ from picaso import justdoit as jdi
 import pandas as pd
 import haze
 from photochem.utils import stars
+from model import model_raw
 
 def get_elizabeth_atm():
     with open('data/PhotochemPT_MiniNep_2.0_2.0_50.0_1.0_0.7525_5.0.pkl','rb') as f:
@@ -64,6 +65,8 @@ def build_effective_truth(
     semi_major=1.0,
     phase=90.0,
     surface_pressure=100.0,
+    surface_pressure_mixing_ratio_est=100.0,
+    temperature_override=None,
 ):
     """Construct a 20-parameter retrieval-space truth vector.
 
@@ -71,11 +74,13 @@ def build_effective_truth(
     one-to-one mapping of the physical photochemical atmosphere.
     """
     truth = np.zeros(20, dtype=float)
-    pmax = surface_pressure
+    pmax = np.minimum(surface_pressure_mixing_ratio_est, surface_pressure)
     cloud_top_pressure = 10.0 ** cloud_log10_P_bottom * 10.0 ** (-cloud_log10_P_thick)
     cloud_thickness = 10.0 ** cloud_log10_P_bottom - cloud_top_pressure
 
     truth[0] = _pressure_weighted_mean(atm, "temperature", pmax=pmax)
+    if temperature_override is not None:
+        truth[0] = temperature_override
     truth[1] = surface_log10_albedo
     truth[2] = np.log10(cloud_top_pressure)
     truth[3] = np.log10(cloud_thickness)
@@ -99,6 +104,7 @@ def build_effective_truth(
     trace_species = ["O2", "H2O", "CO2", "CH4", "O3", "CO", "NH3"]
     for i, sp in enumerate(trace_species, start=13):
         truth[i] = np.log10(max(_pressure_weighted_mean(atm, sp, pmax=pmax), 1e-300))
+        truth[i] = np.maximum(truth[i], -10.0)
 
     return truth
 
@@ -107,7 +113,7 @@ def _build_neptune_truth():
     atm = pd.DataFrame(get_elizabeth_atm())
     return build_effective_truth(
         atm,
-        haze_log10_prod=np.log10(3.0e-14 * 1.0e-100),
+        haze_log10_prod=np.log10(3.0e-14 * 1.0e-8),
         surface_log10_albedo=-2.0,
         planet_radius=2.0,
         planet_mass=4.66,
@@ -117,7 +123,9 @@ def _build_neptune_truth():
         cloud_frac=0.5,
         semi_major=1.0,
         phase=90.0,
-        surface_pressure=100.0,
+        surface_pressure=1000.0,
+        surface_pressure_mixing_ratio_est=1.0,
+        temperature_override=300,
     )
 
 
@@ -141,7 +149,7 @@ def _build_archean_truth():
 
     return build_effective_truth(
         atm,
-        haze_log10_prod=np.log10(3.0e-14 * 1.0e-100),
+        haze_log10_prod=np.log10(3.0e-14 * 1.0e-8),
         surface_log10_albedo=np.log10(0.05),
         planet_radius=1.0,
         planet_mass=1.0,
@@ -152,6 +160,8 @@ def _build_archean_truth():
         semi_major=1.0,
         phase=90.0,
         surface_pressure=1.0,
+        surface_pressure_mixing_ratio_est=1.0,
+        temperature_override=None,
     )
 
 def neptune_spectra():
@@ -349,6 +359,32 @@ def archean_spectra():
 
     return spectra
 
+def neptune_spectra_in_model():
+
+    opacity = jdi.opannection(
+        wave_range=[0.2,1.8],
+        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
+    )
+
+    x = _build_neptune_truth()
+    wv, albedo, fpfs = model_raw(x, opacity)
+    wavl = stars.make_bins(wv)
+
+    return {'clear': (wv, wavl, albedo, fpfs)}
+
+def archean_spectra_in_model():
+
+    opacity = jdi.opannection(
+        wave_range=[0.2,1.8],
+        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
+    )
+
+    x = _build_archean_truth()
+    wv, albedo, fpfs = model_raw(x, opacity)
+    wavl = stars.make_bins(wv)
+
+    return {'clear': (wv, wavl, albedo, fpfs)}
+
 def grid_near_resolution(wv_min, wv_max, R):
     """
     Build wavelength bin edges spanning ``[wv_min, wv_max]`` at a resolving
@@ -452,6 +488,14 @@ def make_cases():
     with open('data/archean.pkl', 'wb') as f:
         pickle.dump(spectra, f)
 
+    spectra = neptune_spectra_in_model()
+    with open('data/neptune_in_model.pkl', 'wb') as f:
+        pickle.dump(spectra, f)
+
+    spectra = archean_spectra_in_model()
+    with open('data/archean_in_model.pkl', 'wb') as f:
+        pickle.dump(spectra, f)
+
 def make_data():
 
     R = np.array([-1.0, np.nan, 140.0])
@@ -473,9 +517,25 @@ def make_data():
     data_dict_archean = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
     data_dict_archean['truth'] = _build_archean_truth()
 
+    # Neptune in model
+    with open('data/neptune_in_model.pkl', 'rb') as f:
+        spectra = pickle.load(f)
+    _, wavl, _, fpfs = spectra['clear']
+    data_dict_neptune_model = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
+    data_dict_neptune_model['truth'] = _build_neptune_truth()
+
+    # Archean
+    with open('data/archean_in_model.pkl', 'rb') as f:
+        spectra = pickle.load(f)
+    _, wavl, _, fpfs = spectra['clear']
+    data_dict_archean_model = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
+    data_dict_archean_model['truth'] = _build_archean_truth()
+
     data = {
         'neptune_clear': data_dict_neptune,
         'archean_clear': data_dict_archean,
+        'neptune_clear_model': data_dict_neptune_model,
+        'archean_clear_model': data_dict_archean_model,
     }
 
     return data
