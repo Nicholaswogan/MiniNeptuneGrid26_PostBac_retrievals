@@ -417,57 +417,34 @@ def make_cases():
 
     cases = {}
 
-    # Mini-Neptune no mass constraint
-    cases['neptune_clear_nomass'] = make_loglike_prior(
-        data_dict=data_dicts['neptune_clear'], 
-        param_names=param_names, 
-        model=model, 
-        model_raw=model_raw, 
-        opacity=OPACITY, 
-        prior=prior_base
-    )
+    labels = ['neptune_clear', 'archean_clear', 'neptune_clear_model', 'archean_clear_model']
+    for i,label in enumerate(labels):
+        data_dict = data_dicts[label]
+        # Without mass constraint
+        cases[f'{label}_nomass'] = make_loglike_prior(
+            data_dict=data_dict, 
+            param_names=param_names, 
+            model=model, 
+            model_raw=model_raw, 
+            opacity=OPACITY, 
+            prior=prior_base
+        )
 
-    # Mini-Neptune w/ mass constraint
-    truth = data_dicts['neptune_clear']['truth']
-    mass = 10.0**truth[8]
-    prior = make_priors(
-        mass_mean=mass,
-        mass_error_frac=0.3,
-    )
-    cases['neptune_clear_mass'] = make_loglike_prior(
-        data_dict=data_dicts['neptune_clear'], 
-        param_names=param_names, 
-        model=model, 
-        model_raw=model_raw, 
-        opacity=OPACITY, 
-        prior=prior
-    )
-
-    # Archean Earth no mass constraint
-    cases['archean_clear_nomass'] = make_loglike_prior(
-        data_dict=data_dicts['archean_clear'], 
-        param_names=param_names, 
-        model=model, 
-        model_raw=model_raw, 
-        opacity=OPACITY, 
-        prior=prior_base
-    )
-
-    # Archean Earth w/ mass constraint
-    truth = data_dicts['archean_clear']['truth']
-    mass = 10.0**truth[8]
-    prior = make_priors(
-        mass_mean=mass,
-        mass_error_frac=0.3,
-    )
-    cases['archean_clear_mass'] = make_loglike_prior(
-        data_dict=data_dicts['archean_clear'], 
-        param_names=param_names, 
-        model=model, 
-        model_raw=model_raw, 
-        opacity=OPACITY, 
-        prior=prior
-    )
+        # With mass constraint
+        truth = data_dict['truth']
+        mass = 10.0**truth[8]
+        prior = make_priors(
+            mass_mean=mass,
+            mass_error_frac=0.3,
+        )
+        cases[f'{label}_mass'] = make_loglike_prior(
+            data_dict=data_dict, 
+            param_names=param_names, 
+            model=model, 
+            model_raw=model_raw, 
+            opacity=OPACITY, 
+            prior=prior
+        )
 
     return cases
 
@@ -483,7 +460,12 @@ if __name__ == '__main__':
     nb.set_num_threads(1)
     _ = threadpool_limits(limits=1)
 
-    models_to_run = list(RETRIEVAL_CASES.keys())
+    models_to_run = [
+        'neptune_clear_model_nomass', 
+        'neptune_clear_model_mass', 
+        'archean_clear_model_nomass', 
+        'archean_clear_model_mass',
+    ]
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
