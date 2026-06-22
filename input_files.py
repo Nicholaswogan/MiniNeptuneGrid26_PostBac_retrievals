@@ -17,7 +17,9 @@ import urllib.parse
 import urllib.request
 import tarfile
 import zipfile
-from picaso import data
+import numpy as np
+from picaso.experimental import opacityfiles
+from picaso.experimental.utils import grid_near_resolution, bin_edges_from_wavelength_edges
 
 def download_and_extract_archive(archive_url, destination_folder, archive_filename=None, delete_archive=False, show_progress=True):
     os.makedirs(destination_folder, exist_ok=True)
@@ -57,7 +59,56 @@ def download_and_extract_archive(archive_url, destination_folder, archive_filena
     return archive_path
 
 
+def opacity_files():
+
+    opacity_dir = '/Users/nicholas/Documents/Research_local/NPP/picaso/photochem_opacities_all'
+
+    wavelength_edges = grid_near_resolution(0.45, 0.55, 20.0)
+    bin_edges1 = bin_edges_from_wavelength_edges(wavelength_edges)
+    wavelength_edges = grid_near_resolution(0.83, 1.0, 140.0)
+    bin_edges2 = bin_edges_from_wavelength_edges(wavelength_edges)
+    bin_edges = np.concatenate((bin_edges1, bin_edges2))
+
+    filename = 'picasofiles/opacities_ck_gap.h5'
+    if not os.path.exists(filename):
+        opacityfiles.opacity_dir_to_correlated_k_hdf5(
+            opacity_dir=opacity_dir,
+            output_hdf5=filename,
+            bin_edges=bin_edges,
+            temperature_range=(0.0, 1000.0),
+        )
+    else:
+        print(f'Opacity file already created: {filename}')
+
+    wavelength_edges = grid_near_resolution(0.45, 1.0, 140.0)
+    bin_edges = bin_edges_from_wavelength_edges(wavelength_edges)
+
+    filename = 'picasofiles/opacities_ck_nogap.h5'
+    if not os.path.exists(filename):
+        opacityfiles.opacity_dir_to_correlated_k_hdf5(
+            opacity_dir=opacity_dir,
+            output_hdf5=filename,
+            bin_edges=bin_edges,
+            temperature_range=(0.0, 1000.0),
+        )
+    else:
+        print(f'Opacity file already created: {filename}')
+
+    filename = 'picasofiles/opacities.h5'
+    if not os.path.exists(filename):
+        opacityfiles.opacity_dir_to_hdf5(
+            opacity_dir=opacity_dir,
+            output_hdf5=filename,
+            wavelength_range=(0.2, 2.0),
+            R=15_00,
+        )
+    else:
+        print(f'Opacity file already created: {filename}')
+
+
 def main():
+
+    opacity_files()
 
     if not os.path.exists('picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db'):
         url = "https://zenodo.org/records/20397663/files/opacities_photochem_0.1_250.0_R15000_v2.db.zip"
@@ -85,6 +136,8 @@ def main():
         )
     else:
         print('Stellar grids are already downloaded')
+
+
 
 
 if __name__ == '__main__':

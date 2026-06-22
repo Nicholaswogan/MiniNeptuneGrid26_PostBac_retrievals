@@ -2,12 +2,13 @@ import numpy as np
 from matplotlib import pyplot as plt
 import utils
 from picaso import justdoit as jdi
+from picaso.experimental import interface
 import numba as nb
+from picaso.experimental import utils as eutils
 
 def main():
-    opacity = jdi.opannection(
-        wave_range=[0.45,1.8],
-        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
+    opacity = interface.opannection(
+        filename_db='picasofiles/opacities.h5',
     )
 
     mix = {
@@ -37,9 +38,6 @@ def main():
         num_gangle=8, 
         num_tangle=8,
         surface_albedo=0.05,
-        stellar_teff=5780.0,
-        stellar_metallicity=0.0,
-        stellar_logg=4.0,
         semi_major=1.0,
         stellar_radius=1.0,
         planet_radius=1.0,
@@ -49,10 +47,18 @@ def main():
     )
 
     df = planet.spectrum(opacity, calculation='reflected')
-    wno, fpfs = jdi.mean_regrid(df['wavenumber'], df['fpfs_reflected'], R=140)
+
+    # Unpack result
+    result = opacity.rad.reflected_result
+    wavl = eutils.grid_near_resolution(0.45, 1.8, 140.0)
+    fpfs = eutils.rebin(
+        eutils.wavelength_edges_from_bin_edges(result.bin_edges),
+        result.fpfs,
+        wavl
+    )
 
     fig, ax = plt.subplots(1,1,figsize=[5,4])
-    ax.plot(1e4/wno, fpfs)
+    ax.stairs(fpfs, wavl)
     ax.set_ylim(0, 1.75e-10)
     ax.set_xlim(0.4, 1.8)
     ax.set_xlabel('Wavelength (micron)')

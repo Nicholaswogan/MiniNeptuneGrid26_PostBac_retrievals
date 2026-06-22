@@ -355,9 +355,6 @@ def initialize_model(
     num_gangle=8, 
     num_tangle=8,
     surface_albedo=0.05,
-    stellar_teff=5780.0,
-    stellar_metallicity=0.0,
-    stellar_logg=4.0,
     semi_major=1.0,
     stellar_radius=1.0,
     planet_radius=1.0,
@@ -387,13 +384,13 @@ def initialize_model(
     # Star
     earth.star(
         opannection=opacity,
-        temp=stellar_teff,
-        metal=stellar_metallicity,
-        logg=stellar_logg,
         semi_major=semi_major,
         radius=stellar_radius,
         radius_unit=u.Unit("R_sun"),
         semi_major_unit=u.Unit("au"),
+        filename='data/dummy_star.txt',
+        w_unit='um',
+        f_unit='erg*cm^(-3)*s^(-1)',
     )
 
     # Set surface albedo
