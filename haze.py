@@ -1,9 +1,11 @@
 from functools import lru_cache
 import numpy as np
 from scipy import constants as const
+from scipy.interpolate import RegularGridInterpolator
 import numba as nb
 from pathlib import Path
 import pandas as pd
+import h5py
 import miepython
 from picaso import atmsetup, justdoit as jdi
 
@@ -807,6 +809,16 @@ def _get_picaso_cloud_wavenumber_grid():
     return np.asarray(jdi.get_cld_input_grid("wave_EGP.dat"), dtype=float)
 
 
+@lru_cache(maxsize=1)
+def _get_picaso_cloud_wavelength_grid():
+    wno = _get_picaso_cloud_wavenumber_grid()
+    if wno.ndim != 1:
+        raise ValueError("PICASO cloud wavenumber grid must be 1D")
+    if np.any(wno <= 0.0):
+        raise ValueError("PICASO cloud wavenumber grid must be positive")
+    return np.sort(1.0e4 / wno)
+
+
 def _coerce_haze_profiles(values, name, nlayer):
     if isinstance(values, dict):
         out = {}
@@ -863,10 +875,11 @@ def make_picaso_haze_clouddf(
         densities,
         radii,
         *,
-        refractive_index_file='input/khare_tholins.refrind',
+        refractive_index_file='data/khare_tholins.refrind',
         x_v=4/3,
         x_i=0.5,
         solar_cutoff_microns=5.0,
+        optics_function=None
     ):
     """Build a PICASO cloud DataFrame from haze profiles and VIRGA Mie optics.
 
@@ -951,21 +964,28 @@ def make_picaso_haze_clouddf(
     radius_profiles = _coerce_haze_profiles(radii, 'radii', nlayer)
     if set(density_profiles) != set(radius_profiles):
         raise ValueError("`densities` and `radii` must have identical species keys")
-    refrind_path = _validate_refrind_file(refractive_index_file)
 
     radii_all = np.concatenate([radius_profiles[key] for key in sorted(radius_profiles)])
     if np.any(radii_all <= 0.0):
         raise ValueError("all `radii` values must be positive")
     radii_cm_grid = np.unique(radii_all.astype(float))
     wave_grid_microns = 1.0e4 / cloud_wavenumber
-    wavelengths_microns, radii_cm_grid, qext, qsca, cos_qscat = _miepython_optics_cache(
-        str(refrind_path),
-        float(x_v),
-        float(x_i),
-        float(solar_cutoff_microns),
-        tuple(wave_grid_microns.tolist()),
-        tuple(radii_cm_grid.tolist())
-    )
+
+    if optics_function is None:
+        refrind_path = _validate_refrind_file(refractive_index_file)
+        wavelengths_microns, radii_cm_grid, qext, qsca, cos_qscat = _miepython_optics_cache(
+            str(refrind_path),
+            float(x_v),
+            float(x_i),
+            float(solar_cutoff_microns),
+            tuple(wave_grid_microns.tolist()),
+            tuple(radii_cm_grid.tolist())
+        )
+    else:
+        wavelengths_microns, radii_cm_grid, qext, qsca, cos_qscat = optics_function(
+            wave_grid_microns,
+            radii_cm_grid,
+        )
 
     nwave = wavelengths_microns.shape[0]
     w0 = np.divide(qsca, qext, out=np.zeros_like(qext), where=qext > 0.0)
@@ -1028,10 +1048,11 @@ def make_picaso_haze_clouddf(
 def make_picaso_haze_clouddf_from_solution(
         solution,
         *,
-        refractive_index_file='input/khare_tholins.refrind',
+        refractive_index_file='data/khare_tholins.refrind',
         x_v=4/3,
         x_i=0.5,
         solar_cutoff_microns=5.0,
+        optics_function=None
     ):
     """Build a PICASO haze dataframe directly from :meth:`solve` output.
 
@@ -1071,4 +1092,151 @@ def make_picaso_haze_clouddf_from_solution(
         x_v=x_v,
         x_i=x_i,
         solar_cutoff_microns=solar_cutoff_microns,
+        optics_function=optics_function
     )
+
+
+def precompute_grid(
+        filename='data/haze_optics_grid.h5',
+        *,
+        refractive_index_file='data/khare_tholins.refrind',
+        wave_grid_microns=None,
+        radii_cm=None,
+        wave_bounds=None,
+        radii_bounds=(1.0e-7, 1.0e-3),
+        nwave=256,
+        nradii=256,
+        x_v=4/3,
+        x_i=0.5,
+        solar_cutoff_microns=5.0,
+        overwrite=False,
+    ):
+    """Precompute haze optical properties on a tensor-product grid.
+
+    The output HDF5 file stores the wavelength grid in microns, the particle
+    radii grid in cm, and the three 2D arrays returned by the Mie backend:
+    ``qext``, ``qsca``, and ``cos_qscat``.
+    """
+    if wave_grid_microns is None:
+        if wave_bounds is None:
+            wave_grid_microns = np.append([0.1, 0.15, 0.2, 0.25], _get_picaso_cloud_wavelength_grid())
+        else:
+            wave_grid_microns = np.linspace(wave_bounds[0], wave_bounds[1], int(nwave))
+    else:
+        wave_grid_microns = np.asarray(wave_grid_microns, dtype=float)
+    if radii_cm is None:
+        radii_cm = np.geomspace(radii_bounds[0], radii_bounds[1], int(nradii))
+    else:
+        radii_cm = np.asarray(radii_cm, dtype=float)
+
+    if wave_grid_microns.ndim != 1:
+        raise ValueError("`wave_grid_microns` must be a 1D array")
+    if radii_cm.ndim != 1:
+        raise ValueError("`radii_cm` must be a 1D array")
+    if wave_grid_microns.size < 2:
+        raise ValueError("`wave_grid_microns` must contain at least two points")
+    if radii_cm.size < 2:
+        raise ValueError("`radii_cm` must contain at least two points")
+    if np.any(~np.isfinite(wave_grid_microns)) or np.any(~np.isfinite(radii_cm)):
+        raise ValueError("grid values must be finite")
+    if np.any(wave_grid_microns <= 0.0) or np.any(radii_cm <= 0.0):
+        raise ValueError("grid values must be positive")
+    if np.any(np.diff(wave_grid_microns) <= 0.0):
+        raise ValueError("`wave_grid_microns` must be strictly increasing")
+    if np.any(np.diff(radii_cm) <= 0.0):
+        raise ValueError("`radii_cm` must be strictly increasing")
+
+    wave_grid_microns, radii_cm, qext, qsca, cos_qscat = _miepython_optics_cache(
+        str(_validate_refrind_file(refractive_index_file)),
+        float(x_v),
+        float(x_i),
+        float(solar_cutoff_microns),
+        tuple(wave_grid_microns.tolist()),
+        tuple(radii_cm.tolist()),
+    )
+
+    filename = Path(filename)
+    filename.parent.mkdir(parents=True, exist_ok=True)
+    if filename.exists() and not overwrite:
+        raise FileExistsError(filename)
+
+    with h5py.File(filename, 'w') as f:
+        f.create_dataset('wavelengths_microns', data=np.asarray(wave_grid_microns, dtype=float))
+        f.create_dataset('radii_cm', data=np.asarray(radii_cm, dtype=float))
+        f.create_dataset('qext', data=np.asarray(qext, dtype=float))
+        f.create_dataset('qsca', data=np.asarray(qsca, dtype=float))
+        f.create_dataset('cos_qscat', data=np.asarray(cos_qscat, dtype=float))
+        f.attrs['refractive_index_file'] = str(Path(refractive_index_file))
+        f.attrs['x_v'] = float(x_v)
+        f.attrs['x_i'] = float(x_i)
+        f.attrs['solar_cutoff_microns'] = float(solar_cutoff_microns)
+        f.attrs['grid_note'] = 'tensor-product grid for haze optics interpolation'
+
+    return filename
+
+
+class HazeInterpolator:
+    """Interpolate precomputed haze optics from an HDF5 file."""
+
+    def __init__(self, filename):
+        filename = Path(filename)
+        if not filename.exists():
+            raise FileNotFoundError(filename)
+
+        with h5py.File(filename, 'r') as f:
+            self.wavelengths_microns = np.asarray(f['wavelengths_microns'][...], dtype=float)
+            self.radii_cm = np.asarray(f['radii_cm'][...], dtype=float)
+            self.qext = np.asarray(f['qext'][...], dtype=float)
+            self.qsca = np.asarray(f['qsca'][...], dtype=float)
+            self.cos_qscat = np.asarray(f['cos_qscat'][...], dtype=float)
+            self.attrs = dict(f.attrs)
+
+        if self.wavelengths_microns.ndim != 1 or self.radii_cm.ndim != 1:
+            raise ValueError("HDF5 wavelength and radii grids must be 1D")
+        if self.qext.shape != (self.wavelengths_microns.size, self.radii_cm.size):
+            raise ValueError("`qext` has incompatible shape")
+        if self.qsca.shape != self.qext.shape or self.cos_qscat.shape != self.qext.shape:
+            raise ValueError("`qsca` and `cos_qscat` must match `qext` shape")
+        if np.any(np.diff(self.wavelengths_microns) <= 0.0):
+            raise ValueError("wavelength grid must be strictly increasing")
+        if np.any(np.diff(self.radii_cm) <= 0.0):
+            raise ValueError("radii grid must be strictly increasing")
+
+        self._qext_interp = RegularGridInterpolator(
+            (self.wavelengths_microns, self.radii_cm),
+            self.qext,
+            bounds_error=True,
+        )
+        self._qsca_interp = RegularGridInterpolator(
+            (self.wavelengths_microns, self.radii_cm),
+            self.qsca,
+            bounds_error=True,
+        )
+        self._cos_qscat_interp = RegularGridInterpolator(
+            (self.wavelengths_microns, self.radii_cm),
+            self.cos_qscat,
+            bounds_error=True,
+        )
+
+    def __call__(self, wavelength_microns, radii_cm):
+        wavelength_microns = np.asarray(wavelength_microns, dtype=float)
+        radii_cm = np.asarray(radii_cm, dtype=float)
+
+        if wavelength_microns.ndim != 1:
+            raise ValueError("`wavelength_microns` must be a 1D array")
+        if radii_cm.ndim != 1:
+            raise ValueError("`radii_cm` must be a 1D array")
+        if wavelength_microns.size == 0 or radii_cm.size == 0:
+            raise ValueError("`wavelength_microns` and `radii_cm` must be non-empty")
+
+        wv, rr = np.meshgrid(wavelength_microns, radii_cm, indexing='ij')
+        pts = np.column_stack((wv.reshape(-1), rr.reshape(-1)))
+
+        qext = self._qext_interp(pts).reshape(wavelength_microns.size, radii_cm.size)
+        qsca = self._qsca_interp(pts).reshape(wavelength_microns.size, radii_cm.size)
+        cos_qscat = self._cos_qscat_interp(pts).reshape(wavelength_microns.size, radii_cm.size)
+
+        return wavelength_microns, radii_cm, qext, qsca, cos_qscat
+
+if __name__ == "__main__":
+    precompute_grid(overwrite=True)
