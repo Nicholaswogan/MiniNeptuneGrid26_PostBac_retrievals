@@ -9,14 +9,14 @@ conda activate hwo_subneptune
 Install PICASO and get reference data:
 
 ```sh
-wget https://github.com/Nicholaswogan/picaso/archive/0f2a21e574f2583786b31ebe09f95b0d372d92d4.zip
-unzip 0f2a21e574f2583786b31ebe09f95b0d372d92d4.zip
-cd picaso-0f2a21e574f2583786b31ebe09f95b0d372d92d4
+wget https://github.com/Nicholaswogan/picaso/archive/77365d37772f25de6d9e0e2e045cdd393647c3f8.zip
+unzip 77365d37772f25de6d9e0e2e045cdd393647c3f8.zip
+cd picaso-77365d37772f25de6d9e0e2e045cdd393647c3f8
 python -m pip install . -v --no-deps --no-build-isolation
 cd ../
-cp -r picaso-0f2a21e574f2583786b31ebe09f95b0d372d92d4/reference picasofiles/
-rm -rf picaso-0f2a21e574f2583786b31ebe09f95b0d372d92d4
-rm 0f2a21e574f2583786b31ebe09f95b0d372d92d4.zip
+cp -r picaso-77365d37772f25de6d9e0e2e045cdd393647c3f8/reference picasofiles/
+rm -rf picaso-77365d37772f25de6d9e0e2e045cdd393647c3f8
+rm 77365d37772f25de6d9e0e2e045cdd393647c3f8.zip
 ```
 
 Get input files:
@@ -29,7 +29,7 @@ python input_files.py
 ```sh
 mkdir -p codex_reference && cd codex_reference
 for u in \
-  https://github.com/natashabatalha/picaso/archive/0f2a21e574f2583786b31ebe09f95b0d372d92d4.zip \
+  https://github.com/natashabatalha/picaso/archive/77365d37772f25de6d9e0e2e045cdd393647c3f8.zip \
   https://github.com/Nicholaswogan/photochem/archive/refs/tags/v0.8.4.zip \
   https://github.com/Nicholaswogan/clima/archive/refs/tags/v0.7.4.zip
 do

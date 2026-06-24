@@ -192,7 +192,7 @@ def prior_masserr(cube, mass_mean, mass_error_frac):
     sigma = mass_mean * mass_error_frac
     a = (mass1 - mass_mean) / sigma
     b = (mass2 - mass_mean) / sigma
-    mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[8])
+    mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[7])
     params[7] = np.log10(mass)  # log10_Mp
 
     params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
@@ -289,9 +289,9 @@ def implicit_priors(x):
     log10_dpc = x[3]
     log10_tauc = x[4]
     # log10_haze_prod = x[5]
-    fc = x[6]
-    log10_Rp = x[7]
-    log10_Mp = x[8]
+    fc = x[5]
+    log10_Rp = x[6]
+    log10_Mp = x[7]
     a = x[8]
     phase = x[9]
     log10P_surf = x[10]
@@ -322,8 +322,13 @@ def make_loglike(model, opacity, data_dict):
         data_bins = data_dict['bins']
         y = data_dict['fpfs']
         e = data_dict['err']
-        resulty = model(cube, opacity, data_bins)
-        if np.any(np.isnan(resulty)):
+        try:
+            resulty = model(cube, opacity, data_bins)
+        except ValueError as err:
+            if "RadtranAtmosphere.setup" in str(err):
+                return -1.0e100
+            raise
+        if np.any(~np.isfinite(resulty)):
             return -1.0e100
         loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
         return loglikelihood
@@ -374,8 +379,6 @@ def make_cases():
     data_dicts = truths.make_data()
 
     cases = {}
-
-    # labels = ['neptune_clear', 'archean_clear', 'neptune_clear_model', 'archean_clear_model']
 
     opacities = {
         'gap': OPACITY_GAP,
