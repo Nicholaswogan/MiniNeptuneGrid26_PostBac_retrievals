@@ -8,6 +8,7 @@ from functools import partial
 from scipy import optimize
 from pathlib import Path
 import utils
+from utils import inverse_zeng_Mp_Rp_relation, zeng_water
 import numpy as np
 from photochem.utils import stars
 from scipy.stats import truncnorm
@@ -22,6 +23,8 @@ import time
 import pymultinest.analyse as pymultinest_analyse
 import truths
 from model import model_raw
+from picaso.experimental import utils as eutils
+from picaso.experimental import interface
 
 PID = os.getpid()
 
@@ -44,45 +47,6 @@ def patch_pymultinest_analyse():
 
 def quantile_to_uniform(quantile, lower_bound, upper_bound):
     return quantile*(upper_bound - lower_bound) + lower_bound
-
-def inverse_zeng_Mp_Rp_relation(radius, CMF):
-    "Rocky planet M-R curves"
-    mass = (radius/(1.07 - 0.21*CMF))**3.7
-    return mass
-
-def zeng_water(radius):
-    "100% water M-R curve"
-    log10R = np.array([
-        -0.23657201, -0.20065945, -0.16411927, -0.12755235, -0.09140776,
-        -0.05601112, -0.02159121,  0.01199311,  0.04414762,  0.07554696,
-        0.10585067,  0.1354507 ,  0.16465022,  0.19368103,  0.22245634,
-        0.2509077 ,  0.27898212,  0.30599588,  0.33183204,  0.35679046,
-        0.38039216,  0.40294883,  0.42488164,  0.44544851,  0.46463856,
-        0.4827307 ,  0.49968708,  0.51560895,  0.53058386,  0.54481191,
-        0.55822842,  0.57100967,  0.58274497,  0.593729  ,  0.60390183,
-        0.61320735,  0.62148786,  0.62900162,  0.63568476,  0.64167237,
-        0.64689362,  0.65156874,  0.65561858,  0.65906007,  0.66200188,
-        0.66445393,  0.66642437,  0.66801297,  0.66922387
-    ])
-    log10M = np.array([
-        -1.33133458, -1.20943337, -1.08576265, -0.96217525, -0.84013215,
-        -0.72033306, -0.60310355, -0.48825029, -0.37613073, -0.26632134,
-        -0.1587657 , -0.05227227,  0.05384643,  0.15956719,  0.26505379,
-        0.37032801,  0.47494434,  0.57634135,  0.67531998,  0.77151399,
-        0.86480763,  0.95607234,  1.04571406,  1.1319393 ,  1.21537315,
-        1.29600667,  1.3743817 ,  1.45040309,  1.52491515,  1.59791447,
-        1.66950283,  1.73973053,  1.8076703 ,  1.87384353,  1.93876982,
-        2.00130093,  2.06182931,  2.1202448 ,  2.17695898,  2.23248787,
-        2.28690535,  2.33984878,  2.39199307,  2.44294987,  2.49317912,
-        2.54245195,  2.59117595,  2.63938687,  2.68699357
-    ])
-
-    log10radius = np.log10(radius)
-    if log10radius > log10R[-1] or log10radius < log10R[0]:
-        raise ValueError
-    
-    mass = 10.0**np.interp(np.log10(radius), log10R, log10M)
-    return mass
 
 def helper(fcn, radius, radius1):
 
@@ -186,37 +150,36 @@ def sample_mass_within_radius_bounds(quantile, log10_Rp):
 def _prior_common(cube):
     params = np.zeros_like(cube)
     params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
-    params[1] = quantile_to_uniform(cube[1], -2, 0) # log10_As
+    params[1] = quantile_to_uniform(cube[1], 0, 1) # As
     params[2] = quantile_to_uniform(cube[2], -5, 3) # log10_pc
     params[3] = quantile_to_uniform(cube[3], -5, 3) # log10_dpc
     params[4] = quantile_to_uniform(cube[4], -3, 3) # log10_tauc
-    params[5] = quantile_to_uniform(cube[5], np.log10(1.0e-14*1.0e-8), np.log10(1.0e-14*1.0e2)) # log10_haze_prod
-    params[6] = quantile_to_uniform(cube[6], -3, 0) # log10_fc
-    params[7] = quantile_to_uniform(cube[7], np.log10(0.6), 1) # log10_Rp
+    params[5] = quantile_to_uniform(cube[5], 0, 1) # fc
+    params[6] = quantile_to_uniform(cube[6], np.log10(0.6), 1) # log10_Rp
 
-    params[9] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[9]) # a
-    params[10] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[10]) # phase
+    params[8] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[8]) # a
+    params[9] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[9]) # phase
 
-    params[12] = quantile_to_uniform(cube[12], 0.0, 1.0) # background H2 fraction
-    params[13] = quantile_to_uniform(cube[13], -10, 0) # O2
-    params[14] = quantile_to_uniform(cube[14], -10, 0) # H2O
-    params[15] = quantile_to_uniform(cube[15], -10, 0) # CO2
-    params[16] = quantile_to_uniform(cube[16], -10, 0) # CH4
-    params[17] = quantile_to_uniform(cube[17], -10, 0) # O3
-    params[18] = quantile_to_uniform(cube[18], -10, 0) # CO
-    params[19] = quantile_to_uniform(cube[19], -10, 0) # NH3
+    params[11] = quantile_to_uniform(cube[11], 0.0, 1.0) # background H2 fraction
+    params[12] = quantile_to_uniform(cube[12], -10, 0) # O2
+    params[13] = quantile_to_uniform(cube[13], -10, 0) # H2O
+    params[14] = quantile_to_uniform(cube[14], -10, 0) # CO2
+    params[15] = quantile_to_uniform(cube[15], -10, 0) # CH4
+    params[16] = quantile_to_uniform(cube[16], -10, 0) # O3
+    params[17] = quantile_to_uniform(cube[17], -10, 0) # CO
+    params[18] = quantile_to_uniform(cube[18], -10, 0) # NH3
     return params
 
 def prior_base(cube):
     params = _prior_common(cube)
-    params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
-    params[11] = realistic_pressure_prior(cube[11], params[8], params[7]) # log10P_surf
+    params[7] = sample_mass_within_radius_bounds(cube[7], params[6]) # log10_Mp
+    params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
     return params
 
 def prior_masserr(cube, mass_mean, mass_error_frac):
     params = _prior_common(cube)
 
-    radius = 10.0**params[7]
+    radius = 10.0**params[6]
     mass1, mass2 = min_mass(radius), max_mass(radius)
 
     if mass_mean <= 0.0:
@@ -230,9 +193,9 @@ def prior_masserr(cube, mass_mean, mass_error_frac):
     a = (mass1 - mass_mean) / sigma
     b = (mass2 - mass_mean) / sigma
     mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[8])
-    params[8] = np.log10(mass)  # log10_Mp
+    params[7] = np.log10(mass)  # log10_Mp
 
-    params[11] = realistic_pressure_prior(cube[11], params[8], params[7]) # log10P_surf
+    params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
 
     return params
 
@@ -263,7 +226,7 @@ def realistic_pressure_prior(quantile, log10_Mp, log10_Rp):
     radius = 10.0**log10_Rp
 
     if must_have_thick_atmosphere(mass, radius):
-        return quantile_to_uniform(quantile, 2.9, 3)
+        return quantile_to_uniform(quantile, 1, 3)
     else:
         return quantile_to_uniform(quantile, -5, 3)
 
@@ -321,19 +284,19 @@ def water_world_possible(mass, radius):
 
 def implicit_priors(x):
     T = x[0]
-    log10_As = x[1]
+    As = x[1]
     log10_pc = x[2]
     log10_dpc = x[3]
     log10_tauc = x[4]
-    log10_haze_prod = x[5]
-    log10_fc = x[6]
+    # log10_haze_prod = x[5]
+    fc = x[6]
     log10_Rp = x[7]
     log10_Mp = x[8]
-    a = x[9]
-    phase = x[10]
-    log10P_surf = x[11]
-    bg_h2_fraction = x[12]
-    log10_trace = x[13:]
+    a = x[8]
+    phase = x[9]
+    log10P_surf = x[10]
+    bg_h2_fraction = x[11]
+    log10_trace = x[12:]
 
     if log10_pc >= log10P_surf:
         return False
@@ -348,12 +311,8 @@ def model(x, opacity, wv_bins):
     if not within_implicit_priors:
         return np.zeros(len(wv_bins))*np.nan
     
-    wv, albedo, fpfs1 = model_raw(x, opacity)
-    wavl = stars.make_bins(wv)
-
-    fpfs = np.empty(len(wv_bins))
-    for i,b in enumerate(wv_bins):
-        fpfs[i] = stars.rebin(wavl.copy(), fpfs1.copy(), b.copy())
+    bin_edges, fpfs1, _ = model_raw(x, opacity)
+    fpfs = eutils.rebin_edges(bin_edges, fpfs1, wv_bins)
     
     return fpfs
 
@@ -392,12 +351,11 @@ def make_cases():
 
     param_names = [
         "T",
-        "log10_As",
+        "As",
         "log10_pc",
         "log10_dpc",
         "log10_tauc",
-        "log10_haze_prod",
-        "log10_fc",
+        "fc",
         "log10_Rp",
         "log10_Mp",
         "a",
@@ -417,55 +375,56 @@ def make_cases():
 
     cases = {}
 
-    labels = ['neptune_clear', 'archean_clear', 'neptune_clear_model', 'archean_clear_model']
-    for i,label in enumerate(labels):
-        data_dict = data_dicts[label]
-        # Without mass constraint
-        cases[f'{label}_nomass'] = make_loglike_prior(
-            data_dict=data_dict, 
-            param_names=param_names, 
-            model=model, 
-            model_raw=model_raw, 
-            opacity=OPACITY, 
-            prior=prior_base
-        )
+    # labels = ['neptune_clear', 'archean_clear', 'neptune_clear_model', 'archean_clear_model']
 
-        # With mass constraint
-        truth = data_dict['truth']
-        mass = 10.0**truth[8]
-        prior = make_priors(
-            mass_mean=mass,
-            mass_error_frac=0.3,
-        )
-        cases[f'{label}_mass'] = make_loglike_prior(
-            data_dict=data_dict, 
-            param_names=param_names, 
-            model=model, 
-            model_raw=model_raw, 
-            opacity=OPACITY, 
-            prior=prior
-        )
+    opacities = {
+        'gap': OPACITY_GAP,
+        'nogap': OPACITY_NOGAP
+    }
+    planet_types = ['neptune', 'archean', 'superarchean']
+    data_cases = ['gap', 'nogap']
+    mass_precisions = [None, 0.5, 0.3, 0.1]
+    for i,planet_type in enumerate(planet_types):
+        for j,data_case in enumerate(data_cases):
+            data_dict = data_dicts[f'{planet_type}_{data_case}']
+            for k,mass_precision in enumerate(mass_precisions):
+                
+                if mass_precision is None:
+                    prior = prior_base
+                else:
+                    truth = data_dict['truth']
+                    mass = 10.0**truth[7]
+                    prior = make_priors(
+                        mass_mean=mass,
+                        mass_error_frac=mass_precision,
+                    )
+
+                label = f'{planet_type}_{data_case}_{mass_precision}'
+                cases[label] = make_loglike_prior(
+                    data_dict=data_dict, 
+                    param_names=param_names, 
+                    model=model, 
+                    model_raw=model_raw, 
+                    opacity=opacities[data_case], 
+                    prior=prior
+                )
 
     return cases
 
-OPACITY = jdi.opannection(
-    wave_range=[0.44,1.01],
-    filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
+OPACITY_GAP = interface.opannection(
+    filename_db='picasofiles/opacities_ck_gap.h5',
+)
+OPACITY_NOGAP = interface.opannection(
+    filename_db='picasofiles/opacities_ck_nogap.h5',
 )
 RETRIEVAL_CASES = make_cases()
-from model import VERBOSE
 
 if __name__ == '__main__':
     patch_pymultinest_analyse()
     nb.set_num_threads(1)
     _ = threadpool_limits(limits=1)
 
-    models_to_run = [
-        'neptune_clear_model_nomass', 
-        'neptune_clear_model_mass', 
-        'archean_clear_model_nomass', 
-        'archean_clear_model_mass',
-    ]
+    models_to_run = list(RETRIEVAL_CASES.keys())
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
@@ -486,3 +445,8 @@ if __name__ == '__main__':
         )
         # Save pickle
         pickle.dump(results, open(outputfiles_basename+'.pkl','wb'))
+
+# 3 planet types = [Archean, Super Archean, Mini Neptune]
+# 2 data types = [Small, Big]
+# 4 mass constraints = [No mass, 50%, 30%, 10%]
+# 24 totla cases

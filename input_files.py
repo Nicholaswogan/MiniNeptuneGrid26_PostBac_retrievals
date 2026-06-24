@@ -100,7 +100,7 @@ def opacity_files():
             opacity_dir=opacity_dir,
             output_hdf5=filename,
             wavelength_range=(0.2, 2.0),
-            R=15_00,
+            R=15_000,
         )
     else:
         print(f'Opacity file already created: {filename}')
@@ -137,7 +137,8 @@ def main():
     else:
         print('Stellar grids are already downloaded')
 
-
+    from haze import precompute_grid
+    precompute_grid(overwrite=True)
 
 
 if __name__ == '__main__':

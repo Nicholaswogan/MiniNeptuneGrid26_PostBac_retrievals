@@ -2,10 +2,11 @@ import numpy as np
 import pickle
 import utils
 from picaso import justdoit as jdi
+from picaso.experimental import interface
+from picaso.experimental import utils as eutils
 import pandas as pd
-import haze
 from photochem.utils import stars
-from model import model_raw
+from model import model_raw, get_result
 
 def get_elizabeth_atm():
     with open('data/PhotochemPT_MiniNep_2.0_2.0_50.0_1.0_0.7525_5.0.pkl','rb') as f:
@@ -54,8 +55,7 @@ def _pressure_weighted_mean(atm, key, pmax=100.0):
 
 def build_effective_truth(
     atm,
-    haze_log10_prod,
-    surface_log10_albedo=-2.0,
+    surface_albedo=10.0**-2.0,
     planet_radius=2.0,
     planet_mass=4.66,
     cloud_log10_P_bottom=np.log10(0.0404),
@@ -68,12 +68,12 @@ def build_effective_truth(
     surface_pressure_mixing_ratio_est=100.0,
     temperature_override=None,
 ):
-    """Construct a 20-parameter retrieval-space truth vector.
+    """Construct a 19-parameter retrieval-space truth vector.
 
     The vector is a proxy truth in the retrieval parameterization, not a literal
     one-to-one mapping of the physical photochemical atmosphere.
     """
-    truth = np.zeros(20, dtype=float)
+    truth = np.zeros(19, dtype=float)
     pmax = np.minimum(surface_pressure_mixing_ratio_est, surface_pressure)
     cloud_top_pressure = 10.0 ** cloud_log10_P_bottom * 10.0 ** (-cloud_log10_P_thick)
     cloud_thickness = 10.0 ** cloud_log10_P_bottom - cloud_top_pressure
@@ -81,28 +81,27 @@ def build_effective_truth(
     truth[0] = _pressure_weighted_mean(atm, "temperature", pmax=pmax)
     if temperature_override is not None:
         truth[0] = temperature_override
-    truth[1] = surface_log10_albedo
+    truth[1] = surface_albedo
     truth[2] = np.log10(cloud_top_pressure)
     truth[3] = np.log10(cloud_thickness)
     truth[4] = np.log10(cloud_opd)
-    truth[5] = haze_log10_prod
-    truth[6] = np.log10(cloud_frac)
-    truth[7] = np.log10(planet_radius)
-    truth[8] = np.log10(planet_mass)
-    truth[9] = semi_major
-    truth[10] = phase
-    truth[11] = np.log10(surface_pressure)
+    truth[5] = cloud_frac
+    truth[6] = np.log10(planet_radius)
+    truth[7] = np.log10(planet_mass)
+    truth[8] = semi_major
+    truth[9] = phase
+    truth[10] = np.log10(surface_pressure)
 
     n2 = _pressure_weighted_mean(atm, "N2", pmax=pmax)
     h2 = _pressure_weighted_mean(atm, "H2", pmax=pmax)
     bg_total = n2 + h2
     if bg_total > 0.0:
-        truth[12] = h2 / bg_total
+        truth[11] = h2 / bg_total
     else:
-        truth[12] = 0.5
+        truth[11] = 0.5
 
     trace_species = ["O2", "H2O", "CO2", "CH4", "O3", "CO", "NH3"]
-    for i, sp in enumerate(trace_species, start=13):
+    for i, sp in enumerate(trace_species, start=12):
         truth[i] = np.log10(max(_pressure_weighted_mean(atm, sp, pmax=pmax), 1e-300))
         truth[i] = np.maximum(truth[i], -10.0)
 
@@ -113,8 +112,7 @@ def _build_neptune_truth():
     atm = pd.DataFrame(get_elizabeth_atm())
     return build_effective_truth(
         atm,
-        haze_log10_prod=np.log10(3.0e-14 * 1.0e-8),
-        surface_log10_albedo=-2.0,
+        surface_albedo=10.0**-2.0,
         planet_radius=2.0,
         planet_mass=4.66,
         cloud_log10_P_bottom=np.log10(0.0404),
@@ -149,8 +147,7 @@ def _build_archean_truth():
 
     return build_effective_truth(
         atm,
-        haze_log10_prod=np.log10(3.0e-14 * 1.0e-8),
-        surface_log10_albedo=np.log10(0.05),
+        surface_albedo=0.05,
         planet_radius=1.0,
         planet_mass=1.0,
         cloud_log10_P_bottom=np.log10(0.7),
@@ -164,12 +161,15 @@ def _build_archean_truth():
         temperature_override=None,
     )
 
-def neptune_spectra():
+def _build_superarchean_truth():
+    truth = _build_archean_truth()
+    planet_radius = 1.3
+    planet_mass = utils.inverse_zeng_Mp_Rp_relation(planet_radius, 0.33)
+    truth[6] = np.log10(planet_radius)
+    truth[7] = np.log10(planet_mass)
+    return truth
 
-    opacity = jdi.opannection(
-        wave_range=[0.2,1.8],
-        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
-    )
+def neptune_spectra(opacity):
 
     atm = get_elizabeth_atm()
     atm = pd.DataFrame(atm)
@@ -192,37 +192,6 @@ def neptune_spectra():
         cloud_log10_P_thick=cloud_log10_P_thick,
     )
 
-    # Haze
-    m = haze.McKayTitanHazeModel(sweep_clear_below_pressure=1.0e7)
-    solution = m.solve_from_atmosphere(
-        atm,
-        column_production=3.0e-14,
-        peak_pressure=1.0e-6,
-        width_pressure=1.0e-6 * np.exp(-1.124),
-        planet_radius=planet_radius,
-        planet_mass=planet_mass,
-        reference_pressure=1.0,
-    )
-    haze_df = haze.make_picaso_haze_clouddf_from_solution(
-        solution, 
-        refractive_index_file='data/khare_tholins.refrind'
-    )
-
-    # Haze df that is very optically thin
-    solution = m.solve_from_atmosphere(
-        atm,
-        column_production=3.0e-14*1e-100,
-        peak_pressure=1.0e-6,
-        width_pressure=1.0e-6 * np.exp(-1.124),
-        planet_radius=planet_radius,
-        planet_mass=planet_mass,
-        reference_pressure=1.0,
-    )
-    haze_clear_df = haze.make_picaso_haze_clouddf_from_solution(
-        solution, 
-        refractive_index_file='data/khare_tholins.refrind'
-    )
-
     # Initialize
     planet = utils.initialize_model(
         opacity,
@@ -231,39 +200,29 @@ def neptune_spectra():
         num_gangle=4, 
         num_tangle=4,
         surface_albedo=None,
-        stellar_teff=5778.0,
-        stellar_metallicity=0.0,
-        stellar_logg=4.4,
         semi_major=1.0,
         stellar_radius=1.0,
         planet_radius=planet_radius,
         planet_mass=planet_mass,
-        cloud_frac=None,
-        cloud_df=None
+        cloud_frac=0.5,
+        cloud_df=cloud_df
     )
 
-    # Hazy
-    df1 = utils.spectrum(planet, opacity, cloud_df, haze_df, water_cloud_frac=0.5)
+    df = planet.spectrum(opacity, calculation='reflected')
 
-    # Not hazy
-    df2 = utils.spectrum(planet, opacity, cloud_df, haze_clear_df, water_cloud_frac=0.5)
+    return get_result(df, opacity)
 
-    spectra = {
-        'clear': get_spectrum(df2),
-        'hazy': get_spectrum(df1),
-    }
-
-    return spectra
-
-def archean_spectra():
-
-    opacity = jdi.opannection(
-        wave_range=[0.2,1.8],
-        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
-    )
-
-    planet_radius = 1.0
+def archean_spectra(opacity):
+    planet_radius = 1.0 
     planet_mass = 1.0
+    return archean_spectra_base(opacity, planet_radius, planet_mass)
+
+def superarchean_spectra(opacity):
+    planet_radius = 1.3
+    planet_mass = utils.inverse_zeng_Mp_Rp_relation(planet_radius, 0.33)
+    return archean_spectra_base(opacity, planet_radius, planet_mass)
+
+def archean_spectra_base(opacity, planet_radius, planet_mass):
 
     mix = {
         "N2": 0.945,
@@ -296,37 +255,6 @@ def archean_spectra():
         cloud_log10_P_thick=cloud_log10_P_thick,
     )
 
-    # Haze
-    m = haze.McKayTitanHazeModel(sweep_clear_below_pressure=1.0e7)
-    solution = m.solve_from_atmosphere(
-        atm,
-        column_production=3.0e-14,
-        peak_pressure=1.0e-6,
-        width_pressure=1.0e-6 * np.exp(-1.124),
-        planet_radius=planet_radius,
-        planet_mass=planet_mass,
-        reference_pressure=None,
-    )
-    haze_df = haze.make_picaso_haze_clouddf_from_solution(
-        solution, 
-        refractive_index_file='data/khare_tholins.refrind'
-    )
-
-    # Haze df that is very optically thin
-    solution = m.solve_from_atmosphere(
-        atm,
-        column_production=3.0e-14*1e-100,
-        peak_pressure=1.0e-6,
-        width_pressure=1.0e-6 * np.exp(-1.124),
-        planet_radius=planet_radius,
-        planet_mass=planet_mass,
-        reference_pressure=None,
-    )
-    haze_clear_df = haze.make_picaso_haze_clouddf_from_solution(
-        solution, 
-        refractive_index_file='data/khare_tholins.refrind'
-    )
-
     planet = utils.initialize_model(
         opacity,
         atm,
@@ -345,130 +273,28 @@ def archean_spectra():
         cloud_df=None
     )
 
-    
-    # Hazy
-    df1 = utils.spectrum(planet, opacity, cloud_df, haze_df, water_cloud_frac=0.5)
+    df = planet.spectrum(opacity, calculation='reflected')
 
-    # Not hazy
-    df2 = utils.spectrum(planet, opacity, cloud_df, haze_clear_df, water_cloud_frac=0.5)
+    return get_result(df, opacity)
 
-    spectra = {
-        'clear': get_spectrum(df2),
-        'hazy': get_spectrum(df1),
-    }
-
-    return spectra
-
-def neptune_spectra_in_model():
-
-    opacity = jdi.opannection(
-        wave_range=[0.2,1.8],
-        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
-    )
-
+def neptune_spectra_in_model(opacity):
     x = _build_neptune_truth()
-    wv, albedo, fpfs = model_raw(x, opacity)
-    wavl = stars.make_bins(wv)
+    return model_raw(x, opacity)
 
-    return {'clear': (wv, wavl, albedo, fpfs)}
-
-def archean_spectra_in_model():
-
-    opacity = jdi.opannection(
-        wave_range=[0.2,1.8],
-        filename_db='picasofiles/opacities_photochem_0.1_250.0_R15000_v2.db',
-    )
-
+def archean_spectra_in_model(opacity):
     x = _build_archean_truth()
-    wv, albedo, fpfs = model_raw(x, opacity)
-    wavl = stars.make_bins(wv)
+    return model_raw(x, opacity)
 
-    return {'clear': (wv, wavl, albedo, fpfs)}
+def superarchean_spectra_in_model(opacity):
+    x = _build_superarchean_truth()
+    return model_raw(x, opacity)
 
-def grid_near_resolution(wv_min, wv_max, R):
-    """
-    Build wavelength bin edges spanning ``[wv_min, wv_max]`` at a resolving
-    power as close as practical to ``R``.
+def make_data_from_spectrum(bin_edges, fpfs, bins_data, snr, fpfs_signal, truth):
 
-    The grid is log-spaced so the bins have approximately constant resolving
-    power across the bandpass, but the final bin is forced to land exactly on
-    ``wv_max`` rather than leaving a tiny leftover bin.
-
-    Parameters
-    ----------
-    wv_min : float
-        Lower wavelength edge.
-    wv_max : float
-        Upper wavelength edge.
-    R : float
-        Target resolving power.
-
-    Returns
-    -------
-    numpy.ndarray
-        Wavelength bin edges.
-    """
-    wv_min = float(wv_min)
-    wv_max = float(wv_max)
-    R = float(R)
-
-    if not np.isfinite(wv_min) or not np.isfinite(wv_max) or not np.isfinite(R):
-        raise ValueError("wv_min, wv_max, and R must be finite")
-    if wv_min <= 0.0 or wv_max <= 0.0:
-        raise ValueError("wv_min and wv_max must be positive")
-    if wv_max <= wv_min:
-        raise ValueError("wv_max must be larger than wv_min")
-    if R <= 0.0:
-        raise ValueError("R must be positive")
-
-    # For a log-spaced grid, the number of bins needed to achieve a resolution
-    # near R is approximately R * ln(wv_max / wv_min). Rounding keeps the grid
-    # close to the requested resolving power while ensuring the last bin is not
-    # artificially tiny.
-    nbin = max(1, int(np.round(R * np.log(wv_max / wv_min))))
-    return np.geomspace(wv_min, wv_max, nbin + 1)
-
-
-def make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr, fpfs_signal):
-
-    assert len(R) == len(snr) == len(wavelength_edges) - 1
-
-    wavl, fpfs = np.ascontiguousarray(wavl), np.ascontiguousarray(fpfs)
-
-    fpfs_err_data = np.zeros(0, np.float64)
-    fpfs_data = np.zeros(0, np.float64)
-    wv_data = np.zeros(0, np.float64)
-    wv_err_data = np.zeros(0, np.float64)
-    bins_data = np.zeros((0, 2), np.float64)
-
-    for i in range(len(R)):
-
-        if np.isnan(R[i]):
-            continue
-
-        if R[i] < 0:
-            wavl_tmp = np.array([wavelength_edges[i], wavelength_edges[i+1]])
-        else:
-            wavl_tmp = grid_near_resolution(wavelength_edges[i], wavelength_edges[i+1], R[i])
-        nbins = len(wavl_tmp) - 1
-
-        # Error
-        fpfs_err_data = np.append(fpfs_err_data, np.ones(nbins)*fpfs_signal/snr[i])
-
-        # Data
-        fpfs_data = np.append(fpfs_data, stars.rebin(wavl, fpfs, np.ascontiguousarray(wavl_tmp)))
-
-        # Each data point
-        wv_data = np.append(wv_data, (wavl_tmp[1:] + wavl_tmp[:-1])/2)
-
-        # Width of each point
-        wv_err_data = np.append(wv_err_data, (wavl_tmp[1:] - wavl_tmp[:-1])/2)
-
-        # Bins of the data
-        bins_tmp = np.empty((nbins, 2))
-        for i in range(nbins):
-            bins_tmp[i,:] = np.array([wavl_tmp[i], wavl_tmp[i+1]])
-        bins_data = np.concatenate((bins_data, bins_tmp), axis=0)
+    fpfs_data = eutils.rebin_edges(bin_edges, fpfs, bins_data)
+    fpfs_err_data = np.ones(bins_data.shape[0])*fpfs_signal/snr
+    wv_data = (bins_data[:,0] + bins_data[:,1])/2
+    wv_err_data = (bins_data[:,1] - bins_data[:,0])/2
 
     data_dict = {}
     data_dict['bins'] = bins_data
@@ -476,69 +302,66 @@ def make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr, fpfs_signal):
     data_dict['err'] = fpfs_err_data
     data_dict['wv'] = wv_data
     data_dict['wv_err'] = wv_err_data
+    data_dict['truth'] = truth
 
     return data_dict
 
-def make_cases():
-    spectra = neptune_spectra()
-    with open('data/neptune.pkl', 'wb') as f:
-        pickle.dump(spectra, f)
-
-    spectra = archean_spectra()
-    with open('data/archean.pkl', 'wb') as f:
-        pickle.dump(spectra, f)
-
-    spectra = neptune_spectra_in_model()
-    with open('data/neptune_in_model.pkl', 'wb') as f:
-        pickle.dump(spectra, f)
-
-    spectra = archean_spectra_in_model()
-    with open('data/archean_in_model.pkl', 'wb') as f:
-        pickle.dump(spectra, f)
-
 def make_data():
 
-    R = np.array([-1.0, np.nan, 140.0])
-    wavelength_edges = np.array([0.45, 0.55, 0.83, 1.0])
-    snr1 = np.array([10.0, np.nan, 10.0])
+    snr = 10.0
     fpfs_signal = 4.0e-10
 
-    # Neptune
-    with open('data/neptune.pkl', 'rb') as f:
-        spectra = pickle.load(f)
-    _, wavl, _, fpfs = spectra['clear']
-    data_dict_neptune = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
-    data_dict_neptune['truth'] = _build_neptune_truth()
+    opacity_gap = interface.opannection(
+        filename_db='picasofiles/opacities_ck_gap.h5'
+    )
+    opacity_nogap = interface.opannection(
+        filename_db='picasofiles/opacities_ck_nogap.h5'
+    )
 
-    # Archean
-    with open('data/archean.pkl', 'rb') as f:
-        spectra = pickle.load(f)
-    _, wavl, _, fpfs = spectra['clear']
-    data_dict_archean = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
-    data_dict_archean['truth'] = _build_archean_truth()
+    bin_edges1 = np.array([[0.45, 0.55]])
+    wavelength_edges = eutils.grid_near_resolution(0.83, 1.0, 140.0)
+    bin_edges2 = eutils.bin_edges_from_wavelength_edges(wavelength_edges)
+    bin_data_gap = np.concatenate((bin_edges1, bin_edges2))
 
-    # Neptune in model
-    with open('data/neptune_in_model.pkl', 'rb') as f:
-        spectra = pickle.load(f)
-    _, wavl, _, fpfs = spectra['clear']
-    data_dict_neptune_model = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
-    data_dict_neptune_model['truth'] = _build_neptune_truth()
+    wavelength_edges = eutils.grid_near_resolution(0.45, 1.0, 140.0)
+    bin_data_nogap = eutils.bin_edges_from_wavelength_edges(wavelength_edges)
 
-    # Archean
-    with open('data/archean_in_model.pkl', 'rb') as f:
-        spectra = pickle.load(f)
-    _, wavl, _, fpfs = spectra['clear']
-    data_dict_archean_model = make_data_from_spectrum(wavl, fpfs, R, wavelength_edges, snr1, fpfs_signal)
-    data_dict_archean_model['truth'] = _build_archean_truth()
+    data = {}
 
-    data = {
-        'neptune_clear': data_dict_neptune,
-        'archean_clear': data_dict_archean,
-        'neptune_clear_model': data_dict_neptune_model,
-        'archean_clear_model': data_dict_archean_model,
-    }
+    # Neptune nogap
+    bin_edges, fpfs, albedo = neptune_spectra_in_model(opacity_gap)
+    truth = _build_neptune_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_gap, snr, fpfs_signal, truth)
+    data['neptune_gap'] = data_dict
+
+    # Neptune gap
+    bin_edges, fpfs, albedo = neptune_spectra_in_model(opacity_nogap)
+    truth = _build_neptune_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
+    data['neptune_nogap'] = data_dict
+
+    # Archean nogap
+    bin_edges, fpfs, albedo = archean_spectra_in_model(opacity_gap)
+    truth = _build_archean_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_gap, snr, fpfs_signal, truth)
+    data['archean_gap'] = data_dict
+
+    # Archean gap
+    bin_edges, fpfs, albedo = archean_spectra_in_model(opacity_nogap)
+    truth = _build_archean_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
+    data['archean_nogap'] = data_dict
+
+    # Super Archean nogap
+    bin_edges, fpfs, albedo = superarchean_spectra_in_model(opacity_gap)
+    truth = _build_superarchean_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_gap, snr, fpfs_signal, truth)
+    data['superarchean_gap'] = data_dict
+
+    # Super Archean gap
+    bin_edges, fpfs, albedo = superarchean_spectra_in_model(opacity_nogap)
+    truth = _build_superarchean_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
+    data['superarchean_nogap'] = data_dict
 
     return data
-
-if __name__ == '__main__':
-    make_cases()

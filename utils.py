@@ -496,6 +496,7 @@ def spectrum(earth, opacity, water_cloud_df, haze_df, water_cloud_frac=0.5):
         return case.spectrum(opacity, calculation="reflected")
 
     df_clear = _run_case(haze_df)
+    df_clear = deepcopy(df_clear)
     df_cloudy = _run_case(_combine_cloud_dfs(haze_df, water_cloud_df))
 
     if not isinstance(df_clear, dict) or not isinstance(df_cloudy, dict):
@@ -518,3 +519,42 @@ def spectrum(earth, opacity, water_cloud_df, haze_df, water_cloud_frac=0.5):
             df_res[key] = (1.0 - water_cloud_frac) * clear_val + water_cloud_frac * cloudy_val
 
     return df_res
+
+def inverse_zeng_Mp_Rp_relation(radius, CMF):
+    "Rocky planet M-R curves"
+    mass = (radius/(1.07 - 0.21*CMF))**3.7
+    return mass
+
+def zeng_water(radius):
+    "100% water M-R curve"
+    log10R = np.array([
+        -0.23657201, -0.20065945, -0.16411927, -0.12755235, -0.09140776,
+        -0.05601112, -0.02159121,  0.01199311,  0.04414762,  0.07554696,
+        0.10585067,  0.1354507 ,  0.16465022,  0.19368103,  0.22245634,
+        0.2509077 ,  0.27898212,  0.30599588,  0.33183204,  0.35679046,
+        0.38039216,  0.40294883,  0.42488164,  0.44544851,  0.46463856,
+        0.4827307 ,  0.49968708,  0.51560895,  0.53058386,  0.54481191,
+        0.55822842,  0.57100967,  0.58274497,  0.593729  ,  0.60390183,
+        0.61320735,  0.62148786,  0.62900162,  0.63568476,  0.64167237,
+        0.64689362,  0.65156874,  0.65561858,  0.65906007,  0.66200188,
+        0.66445393,  0.66642437,  0.66801297,  0.66922387
+    ])
+    log10M = np.array([
+        -1.33133458, -1.20943337, -1.08576265, -0.96217525, -0.84013215,
+        -0.72033306, -0.60310355, -0.48825029, -0.37613073, -0.26632134,
+        -0.1587657 , -0.05227227,  0.05384643,  0.15956719,  0.26505379,
+        0.37032801,  0.47494434,  0.57634135,  0.67531998,  0.77151399,
+        0.86480763,  0.95607234,  1.04571406,  1.1319393 ,  1.21537315,
+        1.29600667,  1.3743817 ,  1.45040309,  1.52491515,  1.59791447,
+        1.66950283,  1.73973053,  1.8076703 ,  1.87384353,  1.93876982,
+        2.00130093,  2.06182931,  2.1202448 ,  2.17695898,  2.23248787,
+        2.28690535,  2.33984878,  2.39199307,  2.44294987,  2.49317912,
+        2.54245195,  2.59117595,  2.63938687,  2.68699357
+    ])
+
+    log10radius = np.log10(radius)
+    if log10radius > log10R[-1] or log10radius < log10R[0]:
+        raise ValueError
+    
+    mass = 10.0**np.interp(np.log10(radius), log10R, log10M)
+    return mass
