@@ -147,6 +147,53 @@ def sample_mass_within_radius_bounds(quantile, log10_Rp):
     log10_mass = quantile_to_uniform(quantile, np.log10(mass1), np.log10(mass2))
     return log10_mass
 
+@lru_cache(maxsize=1)
+def _mass_radius_support_grid():
+    """Precompute monotonic mass-radius envelopes for fast inversion."""
+    radii = np.logspace(np.log10(0.6), 1.0, 2048)
+    min_masses = np.array([min_mass(r) for r in radii], dtype=float)
+    max_masses = np.array([max_mass(r) for r in radii], dtype=float)
+    min_masses = np.maximum.accumulate(min_masses)
+    max_masses = np.maximum.accumulate(max_masses)
+    return radii, min_masses, max_masses
+
+def mass_bounds_for_radius_support():
+    """Mass interval supported by the current radius prior support."""
+    radii, min_masses, max_masses = _mass_radius_support_grid()
+    return float(min_masses[0]), float(max_masses[-1])
+
+def radius_bounds_for_mass(mass):
+    """Return the allowed radius interval for a given mass."""
+    radii, min_masses, max_masses = _mass_radius_support_grid()
+
+    mass = float(mass)
+    mass_min = float(min_masses[0])
+    mass_max = float(max_masses[-1])
+    if mass < mass_min or mass > mass_max:
+        raise ValueError(
+            f"Mass {mass} lies outside the supported mass-radius envelope "
+            f"[{mass_min}, {mass_max}]"
+        )
+
+    r_min = float(np.interp(mass, max_masses, radii, left=radii[0], right=radii[-1]))
+    r_max = float(np.interp(mass, min_masses, radii, left=radii[0], right=radii[-1]))
+
+    r_min = max(r_min, float(radii[0]))
+    r_max = min(r_max, float(radii[-1]))
+    if r_min > r_max:
+        raise ValueError(
+            f"No physical radius interval exists for mass {mass}; "
+            f"got r_min={r_min}, r_max={r_max}"
+        )
+    return r_min, r_max
+
+def sample_radius_within_mass_bounds(quantile, mass):
+    """Sample log10(radius) uniformly within the allowed interval for mass."""
+    r_min, r_max = radius_bounds_for_mass(mass)
+    if r_min <= 0.0 or r_max <= 0.0:
+        raise ValueError("Radius bounds must be positive")
+    return quantile_to_uniform(quantile, np.log10(r_min), np.log10(r_max))
+
 def _prior_common(cube):
     params = np.zeros_like(cube)
     params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
@@ -179,21 +226,19 @@ def prior_base(cube):
 def prior_masserr(cube, mass_mean, mass_error_frac):
     params = _prior_common(cube)
 
-    radius = 10.0**params[6]
-    mass1, mass2 = min_mass(radius), max_mass(radius)
-
     if mass_mean <= 0.0:
         raise ValueError("mass_mean must be positive")
     if mass_error_frac <= 0.0:
         raise ValueError("mass_error_frac must be positive")
-    if mass1 <= 0.0:
-        raise ValueError("Physical mass lower bound must be positive")
 
     sigma = mass_mean * mass_error_frac
+    mass1, mass2 = mass_bounds_for_radius_support()
     a = (mass1 - mass_mean) / sigma
     b = (mass2 - mass_mean) / sigma
     mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[7])
     params[7] = np.log10(mass)  # log10_Mp
+
+    params[6] = sample_radius_within_mass_bounds(cube[6], mass)  # log10_Rp
 
     params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
 
@@ -429,7 +474,7 @@ if __name__ == '__main__':
     _ = threadpool_limits(limits=1)
 
     # models_to_run = list(RETRIEVAL_CASES.keys())
-    models_to_run = ['superarchean_gap_None']
+    models_to_run = ['superarchean_gap_None', 'superarchean_gap_0.1']
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
