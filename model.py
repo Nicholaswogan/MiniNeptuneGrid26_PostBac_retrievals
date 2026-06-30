@@ -35,7 +35,7 @@ def untransform(log10_trace, bg_h2_fraction):
         mix[sp] = float(val)
     return mix
 
-def model_raw(x, opacity, R=None):
+def model_raw(x, opacity):
 
     if VERBOSE:
         print(
@@ -53,7 +53,8 @@ def model_raw(x, opacity, R=None):
     t0 = time.time()
 
     T = x[0]
-    As = x[1]
+    log10_As = x[1]
+    As = 10.0 ** log10_As
     log10_pc = x[2]
     log10_dpc = x[3]
     log10_tauc = x[4]

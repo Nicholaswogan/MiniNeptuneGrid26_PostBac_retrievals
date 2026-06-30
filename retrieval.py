@@ -150,7 +150,7 @@ def sample_mass_within_radius_bounds(quantile, log10_Rp):
 def _prior_common(cube):
     params = np.zeros_like(cube)
     params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
-    params[1] = quantile_to_uniform(cube[1], 0, 1) # As
+    params[1] = quantile_to_uniform(cube[1], -2, 0) # log10_As
     params[2] = quantile_to_uniform(cube[2], -5, 3) # log10_pc
     params[3] = quantile_to_uniform(cube[3], -5, 3) # log10_dpc
     params[4] = quantile_to_uniform(cube[4], -3, 3) # log10_tauc
@@ -284,7 +284,8 @@ def water_world_possible(mass, radius):
 
 def implicit_priors(x):
     T = x[0]
-    As = x[1]
+    log10_As = x[1]
+    As = 10.0 ** log10_As
     log10_pc = x[2]
     log10_dpc = x[3]
     log10_tauc = x[4]
@@ -356,7 +357,7 @@ def make_cases():
 
     param_names = [
         "T",
-        "As",
+        "log10_As",
         "log10_pc",
         "log10_dpc",
         "log10_tauc",
@@ -427,7 +428,8 @@ if __name__ == '__main__':
     nb.set_num_threads(1)
     _ = threadpool_limits(limits=1)
 
-    models_to_run = list(RETRIEVAL_CASES.keys())
+    # models_to_run = list(RETRIEVAL_CASES.keys())
+    models_to_run = ['superarchean_gap_None']
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'

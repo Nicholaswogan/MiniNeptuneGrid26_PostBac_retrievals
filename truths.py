@@ -81,7 +81,7 @@ def build_effective_truth(
     truth[0] = _pressure_weighted_mean(atm, "temperature", pmax=pmax)
     if temperature_override is not None:
         truth[0] = temperature_override
-    truth[1] = surface_albedo
+    truth[1] = np.log10(surface_albedo)
     truth[2] = np.log10(cloud_top_pressure)
     truth[3] = np.log10(cloud_thickness)
     truth[4] = np.log10(cloud_opd)
