@@ -371,9 +371,8 @@ def make_loglike(model, opacity, data_dict):
         try:
             resulty = model(cube, opacity, data_bins)
         except ValueError as err:
-            if "RadtranAtmosphere.setup" in str(err):
-                return -1.0e100
-            raise
+            # If error then we return tiny
+            return -1.0e100
         if np.any(~np.isfinite(resulty)):
             return -1.0e100
         loglikelihood = -0.5*np.sum((y - resulty)**2/e**2)
