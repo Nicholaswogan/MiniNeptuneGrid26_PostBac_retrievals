@@ -6,7 +6,9 @@ from picaso.experimental import interface
 from picaso.experimental import utils as eutils
 import pandas as pd
 from photochem.utils import stars
-from model import model_raw, get_result
+from model import model_raw, model_hazy_raw, get_result
+
+DEFAULT_LOG10_HAZE_PROD = -13.0
 
 def get_elizabeth_atm():
     with open('data/PhotochemPT_MiniNep_2.0_2.0_50.0_1.0_0.7525_5.0.pkl','rb') as f:
@@ -169,6 +171,18 @@ def _build_superarchean_truth():
     truth[7] = np.log10(planet_mass)
     return truth
 
+
+def _build_neptunehazy_truth(log10_haze_prod=DEFAULT_LOG10_HAZE_PROD):
+    return np.insert(_build_neptune_truth(), 5, log10_haze_prod)
+
+
+def _build_archeanhazy_truth(log10_haze_prod=DEFAULT_LOG10_HAZE_PROD):
+    return np.insert(_build_archean_truth(), 5, log10_haze_prod)
+
+
+def _build_superarcheanhazy_truth(log10_haze_prod=DEFAULT_LOG10_HAZE_PROD):
+    return np.insert(_build_superarchean_truth(), 5, log10_haze_prod)
+
 def neptune_spectra(opacity):
 
     atm = get_elizabeth_atm()
@@ -289,6 +303,21 @@ def superarchean_spectra_in_model(opacity):
     x = _build_superarchean_truth()
     return model_raw(x, opacity)
 
+
+def neptunehazy_spectra_in_model(opacity, log10_haze_prod=DEFAULT_LOG10_HAZE_PROD):
+    x = _build_neptunehazy_truth(log10_haze_prod=log10_haze_prod)
+    return model_hazy_raw(x, opacity)
+
+
+def archeanhazy_spectra_in_model(opacity, log10_haze_prod=DEFAULT_LOG10_HAZE_PROD):
+    x = _build_archeanhazy_truth(log10_haze_prod=log10_haze_prod)
+    return model_hazy_raw(x, opacity)
+
+
+def superarcheanhazy_spectra_in_model(opacity, log10_haze_prod=DEFAULT_LOG10_HAZE_PROD):
+    x = _build_superarcheanhazy_truth(log10_haze_prod=log10_haze_prod)
+    return model_hazy_raw(x, opacity)
+
 def make_data_from_spectrum(bin_edges, fpfs, bins_data, snr, fpfs_signal, truth):
 
     fpfs_data = eutils.rebin_edges(bin_edges, fpfs, bins_data)
@@ -363,5 +392,25 @@ def make_data():
     truth = _build_superarchean_truth()
     data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
     data['superarchean_nogap'] = data_dict
+
+    # Hazy
+
+    # Neptune nogap
+    bin_edges, fpfs, albedo = neptunehazy_spectra_in_model(opacity_nogap)
+    truth = _build_neptunehazy_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
+    data['neptunehazy_nogap'] = data_dict
+
+    # Archean hazy nogap
+    bin_edges, fpfs, albedo = archeanhazy_spectra_in_model(opacity_nogap)
+    truth = _build_archeanhazy_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
+    data['archeanhazy_nogap'] = data_dict
+
+    # Super Archean hazy nogap
+    bin_edges, fpfs, albedo = superarcheanhazy_spectra_in_model(opacity_nogap)
+    truth = _build_superarcheanhazy_truth()
+    data_dict = make_data_from_spectrum(bin_edges, fpfs, bin_data_nogap, snr, fpfs_signal, truth)
+    data['superarcheanhazy_nogap'] = data_dict
 
     return data

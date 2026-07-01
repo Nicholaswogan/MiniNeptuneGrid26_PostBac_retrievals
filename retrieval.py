@@ -22,7 +22,7 @@ from threadpoolctl import threadpool_limits
 import time
 import pymultinest.analyse as pymultinest_analyse
 import truths
-from model import model_raw
+from model import model_raw, model_hazy_raw
 from picaso.experimental import utils as eutils
 from picaso.experimental import interface
 
@@ -217,10 +217,40 @@ def _prior_common(cube):
     params[18] = quantile_to_uniform(cube[18], -10, 0) # NH3
     return params
 
+def _prior_common_hazy(cube):
+    params = np.zeros_like(cube)
+    params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
+    params[1] = quantile_to_uniform(cube[1], -2, 0) # log10_As
+    params[2] = quantile_to_uniform(cube[2], -5, 3) # log10_pc
+    params[3] = quantile_to_uniform(cube[3], -5, 3) # log10_dpc
+    params[4] = quantile_to_uniform(cube[4], -3, 3) # log10_tauc
+    params[5] = quantile_to_uniform(cube[5], -19, -12) # log10_haze_prod
+    params[6] = quantile_to_uniform(cube[6], 0, 1) # fc
+    params[7] = quantile_to_uniform(cube[7], np.log10(0.6), 1) # log10_Rp
+
+    params[9] = truncnorm(-5, 5, loc=1.0, scale=0.1).ppf(cube[9]) # a
+    params[10] = truncnorm(-5, 5, loc=90.0, scale=9.0).ppf(cube[10]) # phase
+
+    params[12] = quantile_to_uniform(cube[12], 0.0, 1.0) # background H2 fraction
+    params[13] = quantile_to_uniform(cube[13], -10, 0) # O2
+    params[14] = quantile_to_uniform(cube[14], -10, 0) # H2O
+    params[15] = quantile_to_uniform(cube[15], -10, 0) # CO2
+    params[16] = quantile_to_uniform(cube[16], -10, 0) # CH4
+    params[17] = quantile_to_uniform(cube[17], -10, 0) # O3
+    params[18] = quantile_to_uniform(cube[18], -10, 0) # CO
+    params[19] = quantile_to_uniform(cube[19], -10, 0) # NH3
+    return params
+
 def prior_base(cube):
     params = _prior_common(cube)
     params[7] = sample_mass_within_radius_bounds(cube[7], params[6]) # log10_Mp
     params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
+    return params
+
+def prior_base_hazy(cube):
+    params = _prior_common_hazy(cube)
+    params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
+    params[11] = realistic_pressure_prior(cube[11], params[8], params[7]) # log10P_surf
     return params
 
 def prior_masserr(cube, mass_mean, mass_error_frac):
@@ -244,8 +274,32 @@ def prior_masserr(cube, mass_mean, mass_error_frac):
 
     return params
 
+def prior_masserr_hazy(cube, mass_mean, mass_error_frac):
+    params = _prior_common_hazy(cube)
+
+    if mass_mean <= 0.0:
+        raise ValueError("mass_mean must be positive")
+    if mass_error_frac <= 0.0:
+        raise ValueError("mass_error_frac must be positive")
+
+    sigma = mass_mean * mass_error_frac
+    mass1, mass2 = mass_bounds_for_radius_support()
+    a = (mass1 - mass_mean) / sigma
+    b = (mass2 - mass_mean) / sigma
+    mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[8])
+    params[8] = np.log10(mass)  # log10_Mp
+
+    params[7] = sample_radius_within_mass_bounds(cube[7], mass)  # log10_Rp
+
+    params[11] = realistic_pressure_prior(cube[11], params[8], params[7]) # log10P_surf
+
+    return params
+
 def make_priors(mass_mean, mass_error_frac):
     return partial(prior_masserr, mass_mean=mass_mean, mass_error_frac=mass_error_frac)
+
+def make_priors_hazy(mass_mean, mass_error_frac):
+    return partial(prior_masserr_hazy, mass_mean=mass_mean, mass_error_frac=mass_error_frac)
 
 @lru_cache(maxsize=1)
 def find_max_and_water_root():
@@ -327,22 +381,32 @@ def water_world_possible(mass, radius):
     res[idx] = (mass[idx] > lower[idx]) & (mass[idx] < upper[idx])
     return res
 
-def implicit_priors(x):
+def implicit_priors(x, hazy=False):
     T = x[0]
     log10_As = x[1]
     As = 10.0 ** log10_As
     log10_pc = x[2]
     log10_dpc = x[3]
     log10_tauc = x[4]
-    # log10_haze_prod = x[5]
-    fc = x[5]
-    log10_Rp = x[6]
-    log10_Mp = x[7]
-    a = x[8]
-    phase = x[9]
-    log10P_surf = x[10]
-    bg_h2_fraction = x[11]
-    log10_trace = x[12:]
+    if hazy:
+        log10_haze_prod = x[5]
+        fc = x[6]
+        log10_Rp = x[7]
+        log10_Mp = x[8]
+        a = x[9]
+        phase = x[10]
+        log10P_surf = x[11]
+        bg_h2_fraction = x[12]
+        log10_trace = x[13:]
+    else:
+        fc = x[5]
+        log10_Rp = x[6]
+        log10_Mp = x[7]
+        a = x[8]
+        phase = x[9]
+        log10P_surf = x[10]
+        bg_h2_fraction = x[11]
+        log10_trace = x[12:]
 
     if log10_pc >= log10P_surf:
         return False
@@ -353,11 +417,22 @@ def implicit_priors(x):
 
 def model(x, opacity, wv_bins):
 
-    within_implicit_priors = implicit_priors(x)
+    within_implicit_priors = implicit_priors(x, hazy=False)
     if not within_implicit_priors:
         return np.zeros(len(wv_bins))*np.nan
     
     bin_edges, fpfs1, _ = model_raw(x, opacity)
+    fpfs = eutils.rebin_edges(bin_edges, fpfs1, wv_bins)
+    
+    return fpfs
+
+def model_hazy(x, opacity, wv_bins):
+
+    within_implicit_priors = implicit_priors(x, hazy=True)
+    if not within_implicit_priors:
+        return np.zeros(len(wv_bins))*np.nan
+    
+    bin_edges, fpfs1, _ = model_hazy_raw(x, opacity)
     fpfs = eutils.rebin_edges(bin_edges, fpfs1, wv_bins)
     
     return fpfs
@@ -421,6 +496,29 @@ def make_cases():
         "log10_x_NH3",
     ]
 
+    param_names_hazy = [
+        "T",
+        "log10_As",
+        "log10_pc",
+        "log10_dpc",
+        "log10_tauc",
+        "log10_haze_prod",
+        "fc",
+        "log10_Rp",
+        "log10_Mp",
+        "a",
+        "phase",
+        "log10P_surf",
+        "bg_h2_fraction",
+        "log10_x_O2",
+        "log10_x_H2O",
+        "log10_x_CO2",
+        "log10_x_CH4",
+        "log10_x_O3",
+        "log10_x_CO",
+        "log10_x_NH3",
+    ]
+
     data_dicts = truths.make_data()
 
     cases = {}
@@ -457,6 +555,25 @@ def make_cases():
                     prior=prior
                 )
 
+
+    planet_types = ['neptunehazy', 'archeanhazy', 'superarcheanhazy']
+    data_case = 'nogap'
+    mass_precision = None
+    for i,planet_type in enumerate(planet_types):
+
+        data_dict = data_dicts[f'{planet_type}_{data_case}']
+        prior = prior_base
+
+        label = f'{planet_type}_{data_case}_{mass_precision}'
+        cases[label] = make_loglike_prior(
+            data_dict=data_dict, 
+            param_names=param_names_hazy, 
+            model=model_hazy, 
+            model_raw=model_hazy_raw, 
+            opacity=opacities[data_case], 
+            prior=prior_base_hazy
+        )
+
     return cases
 
 OPACITY_GAP = interface.opannection(
@@ -473,7 +590,7 @@ if __name__ == '__main__':
     _ = threadpool_limits(limits=1)
 
     # models_to_run = list(RETRIEVAL_CASES.keys())
-    models_to_run = ['superarchean_gap_None', 'superarchean_gap_0.1']
+    models_to_run = ['neptunehazy_nogap_None', 'archeanhazy_nogap_None', 'superarcheanhazy_nogap_None']
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
@@ -498,4 +615,4 @@ if __name__ == '__main__':
 # 3 planet types = [Archean, Super Archean, Mini Neptune]
 # 2 data types = [Small, Big]
 # 4 mass constraints = [No mass, 50%, 30%, 10%]
-# 24 totla cases
+# 24 total cases
