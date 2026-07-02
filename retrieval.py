@@ -247,6 +247,14 @@ def prior_base(cube):
     params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
     return params
 
+def prior_base_linearRp(cube):
+    params = _prior_common(cube)
+    radius = quantile_to_uniform(cube[6], 0.6, 10.0)
+    params[6] = np.log10(radius) # log10_Rp
+    params[7] = sample_mass_within_radius_bounds(cube[7], params[6]) # log10_Mp
+    params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
+    return params
+
 def prior_base_hazy(cube):
     params = _prior_common_hazy(cube)
     params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
@@ -555,7 +563,6 @@ def make_cases():
                     prior=prior
                 )
 
-
     planet_types = ['neptunehazy', 'archeanhazy', 'superarcheanhazy']
     data_case = 'nogap'
     mass_precision = None
@@ -574,6 +581,16 @@ def make_cases():
             prior=prior_base_hazy
         )
 
+    data_dict = data_dicts['archean_gap']
+    cases['archean_gap_None_linearRp'] = make_loglike_prior(
+        data_dict=data_dict,
+        param_names=param_names,
+        model=model,
+        model_raw=model_raw,
+        opacity=opacities['gap'],
+        prior=prior_base_linearRp,
+    )
+
     return cases
 
 OPACITY_GAP = interface.opannection(
@@ -590,7 +607,7 @@ if __name__ == '__main__':
     _ = threadpool_limits(limits=1)
 
     # models_to_run = list(RETRIEVAL_CASES.keys())
-    models_to_run = ['neptunehazy_nogap_None', 'archeanhazy_nogap_None', 'superarcheanhazy_nogap_None']
+    models_to_run = ['archean_gap_None_linearRp']
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
