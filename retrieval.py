@@ -194,6 +194,13 @@ def sample_radius_within_mass_bounds(quantile, mass):
         raise ValueError("Radius bounds must be positive")
     return quantile_to_uniform(quantile, np.log10(r_min), np.log10(r_max))
 
+def sample_radius_within_mass_bounds_linear(quantile, mass):
+    """Sample radius uniformly within the allowed interval for mass."""
+    r_min, r_max = radius_bounds_for_mass(mass)
+    if r_min <= 0.0 or r_max <= 0.0:
+        raise ValueError("Radius bounds must be positive")
+    return quantile_to_uniform(quantile, r_min, r_max)
+
 def _prior_common(cube):
     params = np.zeros_like(cube)
     params[0] = quantile_to_uniform(cube[0], 100.0, 1000.0) # T
@@ -255,6 +262,28 @@ def prior_base_linearRp(cube):
     params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
     return params
 
+def prior_masserr_linearRp(cube, mass_mean, mass_error_frac):
+    params = _prior_common(cube)
+
+    if mass_mean <= 0.0:
+        raise ValueError("mass_mean must be positive")
+    if mass_error_frac <= 0.0:
+        raise ValueError("mass_error_frac must be positive")
+
+    sigma = mass_mean * mass_error_frac
+    mass1, mass2 = mass_bounds_for_radius_support()
+    a = (mass1 - mass_mean) / sigma
+    b = (mass2 - mass_mean) / sigma
+    mass = truncnorm(a, b, loc=mass_mean, scale=sigma).ppf(cube[7])
+    params[7] = np.log10(mass)  # log10_Mp
+
+    radius = sample_radius_within_mass_bounds_linear(cube[6], mass)
+    params[6] = np.log10(radius)  # log10_Rp
+
+    params[10] = realistic_pressure_prior(cube[10], params[7], params[6]) # log10P_surf
+
+    return params
+
 def prior_base_hazy(cube):
     params = _prior_common_hazy(cube)
     params[8] = sample_mass_within_radius_bounds(cube[8], params[7]) # log10_Mp
@@ -308,6 +337,9 @@ def make_priors(mass_mean, mass_error_frac):
 
 def make_priors_hazy(mass_mean, mass_error_frac):
     return partial(prior_masserr_hazy, mass_mean=mass_mean, mass_error_frac=mass_error_frac)
+
+def make_priors_linearRp(mass_mean, mass_error_frac):
+    return partial(prior_masserr_linearRp, mass_mean=mass_mean, mass_error_frac=mass_error_frac)
 
 @lru_cache(maxsize=1)
 def find_max_and_water_root():
@@ -563,6 +595,31 @@ def make_cases():
                     prior=prior
                 )
 
+    for i,planet_type in enumerate(planet_types):
+        for j,data_case in enumerate(data_cases):
+            data_dict = data_dicts[f'{planet_type}_{data_case}']
+            for k,mass_precision in enumerate(mass_precisions):
+                
+                if mass_precision is None:
+                    prior = prior_base_linearRp
+                else:
+                    truth = data_dict['truth']
+                    mass = 10.0**truth[7]
+                    prior = make_priors_linearRp(
+                        mass_mean=mass,
+                        mass_error_frac=mass_precision,
+                    )
+
+                label = f'{planet_type}_{data_case}_{mass_precision}_linearRp'
+                cases[label] = make_loglike_prior(
+                    data_dict=data_dict,
+                    param_names=param_names,
+                    model=model,
+                    model_raw=model_raw,
+                    opacity=opacities[data_case],
+                    prior=prior,
+                )
+
     planet_types = ['neptunehazy', 'archeanhazy', 'superarcheanhazy']
     data_case = 'nogap'
     mass_precision = None
@@ -581,16 +638,6 @@ def make_cases():
             prior=prior_base_hazy
         )
 
-    data_dict = data_dicts['archean_gap']
-    cases['archean_gap_None_linearRp'] = make_loglike_prior(
-        data_dict=data_dict,
-        param_names=param_names,
-        model=model,
-        model_raw=model_raw,
-        opacity=opacities['gap'],
-        prior=prior_base_linearRp,
-    )
-
     return cases
 
 OPACITY_GAP = interface.opannection(
@@ -607,7 +654,10 @@ if __name__ == '__main__':
     _ = threadpool_limits(limits=1)
 
     # models_to_run = list(RETRIEVAL_CASES.keys())
-    models_to_run = ['archean_gap_None_linearRp']
+    models_to_run = sorted([
+        name for name in RETRIEVAL_CASES
+        if name.endswith('_linearRp') and 'hazy' not in name
+    ])
     for model_name in models_to_run:
         # Setup directories
         outputfiles_basename = f'pymultinest/{model_name}/{model_name}'
